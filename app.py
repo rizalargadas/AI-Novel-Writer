@@ -13,15 +13,19 @@ load_dotenv()
 
 client = OpenAI()
 
-# Folders
-BASE_DIR = Path(".")
-OUTPUTS_DIR = BASE_DIR / "outputs"
-CHAPTERS_DIR = BASE_DIR / "chapters"
-PUBLISHING_DIR = BASE_DIR / "publishing"
-
-OUTPUTS_DIR.mkdir(exist_ok=True)
-CHAPTERS_DIR.mkdir(exist_ok=True)
-PUBLISHING_DIR.mkdir(exist_ok=True)
+def get_project_dirs(project_folder: str):
+    """
+    Returns (OUTPUTS_DIR, CHAPTERS_DIR, PUBLISHING_DIR) all rooted
+    inside the user-chosen project folder. Creates them if missing.
+    """
+    base = Path(project_folder)
+    outputs  = base / "outputs"
+    chapters = base / "chapters"
+    publishing = base / "publishing"
+    outputs.mkdir(parents=True, exist_ok=True)
+    chapters.mkdir(parents=True, exist_ok=True)
+    publishing.mkdir(parents=True, exist_ok=True)
+    return outputs, chapters, publishing
 
 WRITING_PHILOSOPHY = """
 WRITING PHILOSOPHY (internalize this before every chapter)
@@ -196,11 +200,12 @@ def ask_openai(prompt, model="gpt-5.5"):
     return response.output_text
 
 
-def generate_pitch_prompt(story_idea, genre):
+def generate_pitch_prompt(story_idea):
     return f"""
-You are a bestselling LGBTQ+ fiction writer with expertise in {genre}.
+You are a bestselling LGBTQ+ fiction writer.
 
 Using the details below, generate 5 distinct story plot concepts.
+Let the genre, tone, and subgenre emerge naturally from the story idea — do not force a fixed genre.
 
 Format each option exactly like this:
 
@@ -495,7 +500,7 @@ def get_chapter_title_from_outline(outline_text, chapter_number):
 
     return "Untitled"
 
-def compile_chapters_to_docx(metadata_text, selected_pitch_text="", outline_text="", output_path=None):
+def compile_chapters_to_docx(metadata_text, selected_pitch_text="", outline_text="", output_path=None, chapters_dir=None, publishing_dir=None):
     """
     Compiles all chapter_XX.md files into one formatted DOCX.
     Ensures:
@@ -537,7 +542,7 @@ def compile_chapters_to_docx(metadata_text, selected_pitch_text="", outline_text
 
     doc.add_page_break()
 
-    chapter_files = sorted(CHAPTERS_DIR.glob("chapter_*.md"))
+    chapter_files = sorted(chapters_dir.glob("chapter_*.md"))
 
     chapter_files = [
         file for file in chapter_files
@@ -557,7 +562,7 @@ def compile_chapters_to_docx(metadata_text, selected_pitch_text="", outline_text
             doc.add_page_break()
 
     if output_path is None:
-        output_path = PUBLISHING_DIR / "final_manuscript.docx"
+        output_path = publishing_dir / "final_manuscript.docx"
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -603,7 +608,7 @@ def save_text_as_docx(text, output_path, title=None):
 
     return output_path
 
-def export_final_publishing_outputs(parent_folder, metadata_text, selected_pitch_text, outline_text, cover_prompt, d2d_metadata, youtube_metadata):
+def export_final_publishing_outputs(parent_folder, metadata_text, selected_pitch_text, outline_text, cover_prompt, d2d_metadata, youtube_metadata, chapters_dir):
     """
     Exports the 4 final publishing files into:
     [chosen parent folder] / [Novel Title] /
@@ -625,7 +630,9 @@ def export_final_publishing_outputs(parent_folder, metadata_text, selected_pitch
         metadata_text=metadata_text,
         selected_pitch_text=selected_pitch_text,
         outline_text=outline_text,
-        output_path=export_dir / f"{novel_folder_name} - Final Manuscript.docx"
+        output_path=export_dir / f"{novel_folder_name} - Final Manuscript.docx",
+        chapters_dir=chapters_dir,
+        publishing_dir=export_dir
     )
 
     cover_path = export_dir / f"{novel_folder_name} - Book Cover Prompt.txt"
@@ -962,21 +969,21 @@ CHAPTER TO FIX:
 {chapter_text}
 """
 
-def final_audit_and_fix_all_chapters(metadata_text, character_text, ending_text, outline_text, model, status=None):
+def final_audit_and_fix_all_chapters(metadata_text, character_text, ending_text, outline_text, model, chapters_dir, outputs_dir, status=None):
     """
     Runs a final audit/fix pass across all chapter files.
     Updates chapter files directly.
     Saves final audit fix logs.
     """
 
-    chapter_files = sorted(CHAPTERS_DIR.glob("chapter_*.md"))
+    chapter_files = sorted(chapters_dir.glob("chapter_*.md"))
 
     chapter_files = [
         file for file in chapter_files
         if not file.name.endswith("_log.md") and not file.name.endswith("_final_log.md")
     ]
 
-    full_manuscript_text = get_full_manuscript()
+    full_manuscript_text = get_full_manuscript(chapters_dir)
     final_logs = []
 
     for index, chapter_file in enumerate(chapter_files, start=1):
@@ -1005,16 +1012,16 @@ def final_audit_and_fix_all_chapters(metadata_text, character_text, ending_text,
 
         chapter_file.write_text(fixed_chapter, encoding="utf-8")
 
-        final_log_file = CHAPTERS_DIR / f"chapter_{chapter_number:02}_final_log.md"
+        final_log_file = chapters_dir / f"chapter_{chapter_number:02}_final_log.md"
         final_log_file.write_text(final_change_log, encoding="utf-8")
 
         final_logs.append(f"# Chapter {chapter_number} Final Audit Log\n\n{final_change_log}")
 
         # Refresh manuscript after each chapter fix so later chapters compare against updated text
-        full_manuscript_text = get_full_manuscript()
+        full_manuscript_text = get_full_manuscript(chapters_dir)
 
     combined_final_log = "\n\n".join(final_logs)
-    save_markdown(OUTPUTS_DIR / "07_final_audit_fixes.md", combined_final_log)
+    save_markdown(outputs_dir / "07_final_audit_fixes.md", combined_final_log)
 
     return combined_final_log
 
@@ -1176,12 +1183,12 @@ Indicate:
 Output as clean Markdown.
 """
 
-def get_full_manuscript():
+def get_full_manuscript(chapters_dir):
     """
     Combines all real chapter files into one manuscript string.
     Excludes audit/change log files.
     """
-    chapter_files = sorted(CHAPTERS_DIR.glob("chapter_*.md"))
+    chapter_files = sorted(chapters_dir.glob("chapter_*.md"))
 
     chapter_files = [
         file for file in chapter_files
@@ -1195,12 +1202,12 @@ def get_full_manuscript():
 
     return "\n\n".join(manuscript_parts)
 
-def clear_generated_chapters():
+def clear_generated_chapters(chapters_dir):
     """
     Deletes old generated chapter and chapter log files before a fresh Auto Mode run.
     Prevents old project chapters from being compiled into the new manuscript.
     """
-    for file in CHAPTERS_DIR.glob("chapter_*.md"):
+    for file in chapters_dir.glob("chapter_*.md"):
         file.unlink()
 
 def extract_chapter_count_from_outline(outline_text):
@@ -1225,6 +1232,34 @@ st.title("AI Novel Writing App")
 st.write("A simple app to automate your novel SOP step by step.")
 
 st.sidebar.header("Settings")
+
+# --- Project Folder ---
+st.sidebar.subheader("Project Folder")
+st.sidebar.caption("Choose a folder outside the app where all outputs will be saved.")
+
+default_project_folder = r"D:\Books"
+
+project_folder = st.sidebar.text_input(
+    "Project folder path",
+    value=st.session_state.get("project_folder", default_project_folder),
+    help="Paste any folder path on your computer. It will be created if it doesn't exist."
+)
+
+if st.sidebar.button("Set Folder"):
+    try:
+        Path(project_folder).mkdir(parents=True, exist_ok=True)
+        st.session_state["project_folder"] = project_folder
+        st.sidebar.success(f"Folder set:\n{project_folder}")
+    except Exception as e:
+        st.sidebar.error(f"Could not create folder: {e}")
+
+if "project_folder" not in st.session_state:
+    st.session_state["project_folder"] = default_project_folder
+
+OUTPUTS_DIR, CHAPTERS_DIR, PUBLISHING_DIR = get_project_dirs(st.session_state["project_folder"])
+
+st.sidebar.caption(f"**Active project folder:**\n`{st.session_state['project_folder']}`")
+st.sidebar.divider()
 
 model = st.sidebar.selectbox(
     "Model",
@@ -1254,14 +1289,13 @@ page = st.sidebar.radio(
 if page == "Step 1 - Pitch Maker":
     st.header("Step 1 - Pitch Maker")
 
-    genre = st.text_input("Genre", value="sapphic dark romance / psychological thriller")
     story_idea = st.text_area("Paste your story idea here", height=300)
 
     if st.button("Generate Pitch Options"):
         if not story_idea.strip():
             st.error("Please paste a story idea first.")
         else:
-            prompt = generate_pitch_prompt(story_idea, genre)
+            prompt = generate_pitch_prompt(story_idea)
             with st.spinner("Generating pitch options..."):
                 result = ask_openai(prompt, model=model)
 
@@ -1521,7 +1555,9 @@ if page == "Step 6 - Write Chapter":
             docx_path = compile_chapters_to_docx(
                 metadata_text=metadata_text,
                 selected_pitch_text=selected_pitch_text,
-                outline_text=outline_text
+                outline_text=outline_text,
+                chapters_dir=CHAPTERS_DIR,
+                publishing_dir=PUBLISHING_DIR
             )
             st.success(f"Compiled manuscript saved to {docx_path}")
 
@@ -1532,85 +1568,168 @@ if page == "Auto Mode - Step 1 to Step 10":
         "Auto Mode will call the API multiple times. This is convenient, but it can use more credits."
     )
 
+    st.info(
+        f"novels will be saved inside: `{st.session_state['project_folder']} / [Novel Title] /`  \n"
+        "Change the parent folder in the sidebar under **Project Folder**."
+    )
+
     auto_enabled = st.toggle("Enable Auto Mode")
 
-    genre = st.text_input(
-        "Genre",
-        value="sapphic dark romance / psychological thriller",
-        key="auto_genre"
-    )
-
+    # ── PHASE 1 INPUT ───────────────────────────────────────────────────────
     story_idea = st.text_area(
-        "Paste your story idea here",
+        "Your story idea",
         height=300,
-        key="auto_story_idea"
-    )
-
-    existing_outline_text = read_markdown(OUTPUTS_DIR / "05_outline.md")
-    existing_outline_chapter_count = extract_chapter_count_from_outline(existing_outline_text)
-
-    suggested_chapter_count = max(20, existing_outline_chapter_count)
-
-    st.info(
-        f"Auto Mode will use the chapter count from Step 5 outline. "
-        f"Current detected count: {existing_outline_chapter_count if existing_outline_chapter_count else 'No outline found yet'}. "
-        f"Minimum chapter count: 20."
+        key="auto_story_idea",
+        placeholder="Describe your story idea here. Genre, tone, and theme will be inferred automatically."
     )
 
     fallback_chapter_count = st.number_input(
-        "Fallback chapter count if Auto Mode cannot detect chapters from the outline",
+        "Fallback chapter count (used if the outline count cannot be detected)",
         min_value=20,
         max_value=100,
-        value=suggested_chapter_count,
+        value=20,
         step=1
     )
 
-    final_output_parent_folder = st.text_input(
-        "Final publishing output folder",
-        value=str((BASE_DIR / "final_exports").resolve()),
-        help="Paste the folder path where you want the final publishing files saved."
-    )
+    run_phase1 = st.button("Generate Pitch & Detect Title", disabled=not auto_enabled)
 
-    run_auto = st.button("Run Auto Mode from Step 1 to Step 10")
-
-    if run_auto:
-        if not auto_enabled:
-            st.error("Turn on the Auto Mode toggle first.")
-        elif not story_idea.strip():
+    # ── PHASE 1 EXECUTION ───────────────────────────────────────────────────
+    if run_phase1:
+        if not story_idea.strip():
             st.error("Please paste your story idea first.")
-        else:
-            progress = st.progress(0)
-            status = st.empty()
+            st.stop()
 
-            clear_generated_chapters()
-
-            # STEP 1 - Pitch Maker
-            status.write("Step 1: Generating pitch options...")
+        with st.spinner("Step 1: Generating pitch options..."):
             pitch_options_raw = ask_openai(
-                generate_pitch_prompt(story_idea, genre),
+                generate_pitch_prompt(story_idea),
                 model=model
             )
 
-            pitch_options = split_options(pitch_options_raw, label="OPTION")
+        pitch_options = split_options(pitch_options_raw, label="OPTION")
 
-            recommended_pitch_number = extract_recommended_number(
-                pitch_options_raw,
-                recommendation_label="OPTION",
-                item_label="OPTION"
+        recommended_pitch_number = extract_recommended_number(
+            pitch_options_raw,
+            recommendation_label="OPTION",
+            item_label="OPTION"
+        )
+
+        if not pitch_options:
+            st.error("Could not detect any pitch options from Step 1. Please try again.")
+            st.stop()
+
+        st.session_state["auto_pitch_options_raw"] = pitch_options_raw
+        st.session_state["auto_pitch_options"] = pitch_options
+        st.session_state["auto_recommended_pitch_number"] = recommended_pitch_number
+        st.session_state["auto_phase1_done"] = True
+        st.session_state["auto_title_approved"] = False
+        st.session_state["auto_pitch_chosen"] = False
+        st.session_state.pop("auto_show_title_input", None)
+
+    # ── PITCH SELECTION + TITLE APPROVAL ────────────────────────────────────
+    if st.session_state.get("auto_phase1_done"):
+
+        st.divider()
+        st.subheader("Step 1 Complete — Choose Your Pitch")
+
+        with st.expander("View all generated pitch options", expanded=True):
+            st.markdown(st.session_state["auto_pitch_options_raw"])
+
+        pitch_options = st.session_state["auto_pitch_options"]
+        recommended_pitch_number = st.session_state.get("auto_recommended_pitch_number")
+
+        default_index = 0
+        if recommended_pitch_number:
+            for i, p in enumerate(pitch_options):
+                if re.search(rf"(?i)^OPTION\s+{recommended_pitch_number}\b", p.strip()):
+                    default_index = i
+                    break
+
+        if recommended_pitch_number:
+            st.info(f"AI recommends Option {recommended_pitch_number} — pre-selected below.")
+
+        chosen_pitch = st.selectbox(
+            "Select the pitch you want to use",
+            pitch_options,
+            index=default_index,
+            format_func=lambda x: x.split("\n")[0][:100],
+            key="auto_chosen_pitch_select"
+        )
+
+        if st.button("✅ Confirm Pitch & Continue", key="confirm_pitch"):
+            detected_title = extract_title_from_metadata(chosen_pitch, chosen_pitch)
+            st.session_state["auto_selected_pitch"] = chosen_pitch
+            st.session_state["auto_detected_title"] = detected_title
+            st.session_state["auto_pitch_chosen"] = True
+            st.session_state["auto_title_approved"] = False
+            st.session_state.pop("auto_show_title_input", None)
+
+    if st.session_state.get("auto_pitch_chosen"):
+
+        st.divider()
+        st.subheader("Title Approval")
+
+        st.markdown("**Your chosen pitch:**")
+        st.markdown(st.session_state["auto_selected_pitch"])
+
+        detected_title = st.session_state.get("auto_detected_title", "Untitled Novel")
+        st.markdown(f"**Detected novel title:** `{detected_title}`")
+
+        approve_col, reject_col = st.columns(2)
+        with approve_col:
+            approve = st.button("✅ Approve Title & Continue", key="approve_title")
+        with reject_col:
+            reject = st.button("✏️ Enter My Own Title", key="reject_title")
+
+        if approve:
+            st.session_state["auto_final_title"] = detected_title
+            st.session_state["auto_title_approved"] = True
+
+        if reject:
+            st.session_state["auto_title_approved"] = False
+            st.session_state["auto_show_title_input"] = True
+
+        if st.session_state.get("auto_show_title_input") and not st.session_state.get("auto_title_approved"):
+            custom_title = st.text_input(
+                "Enter your title",
+                value=detected_title,
+                key="auto_custom_title"
             )
+            if st.button("Use This Title", key="confirm_custom_title"):
+                if custom_title.strip():
+                    st.session_state["auto_final_title"] = custom_title.strip()
+                    st.session_state["auto_title_approved"] = True
+                    st.session_state["auto_show_title_input"] = False
+                else:
+                    st.error("Please enter a title.")
 
-            selected_pitch = pick_recommended_option(
-                pitch_options,
-                recommended_pitch_number,
-                label="OPTION"
-            )
+    # ── PHASE 2 EXECUTION ───────────────────────────────────────────────────
+    if st.session_state.get("auto_title_approved") and st.session_state.get("auto_pitch_chosen"):
 
-            if not selected_pitch.strip():
-                st.error("Auto Mode stopped: could not detect a selected pitch from Step 1.")
-                st.stop()
+        final_title = st.session_state["auto_final_title"]
+        novel_folder_name = safe_folder_name(final_title)
+        novel_dir = Path(st.session_state["project_folder"]) / novel_folder_name
+
+        st.success(f"Title confirmed: **{final_title}**")
+        st.info(f"All files will be saved to: `{novel_dir}`")
+
+        OUTPUTS_DIR, CHAPTERS_DIR, PUBLISHING_DIR = get_project_dirs(str(novel_dir))
+
+        run_phase2 = st.button("▶ Run Steps 2–10 (Full Auto)", key="run_phase2")
+
+        if run_phase2:
+            selected_pitch = st.session_state["auto_selected_pitch"]
+            pitch_options_raw = st.session_state["auto_pitch_options_raw"]
+
+            progress = st.progress(0)
+            status = st.empty()
+
+            clear_generated_chapters(CHAPTERS_DIR)
 
             save_markdown(OUTPUTS_DIR / "01_pitch_options_raw.md", pitch_options_raw)
             save_markdown(OUTPUTS_DIR / "01_selected_pitch.md", selected_pitch)
+
+            # Save approved title so later steps can read it
+            save_markdown(OUTPUTS_DIR / "00_novel_title.txt", final_title)
 
             progress.progress(10)
 
@@ -1656,6 +1775,17 @@ if page == "Auto Mode - Step 1 to Step 10":
                 generate_metadata_prompt(selected_pitch, expanded_ending),
                 model=model
             )
+
+            # Inject the user-approved title into metadata so all downstream steps use it
+            metadata = re.sub(
+                r"(?im)^(Novel Title:|Book Title:|Title:)\s*.+$",
+                f"Novel Title: {final_title}",
+                metadata,
+                count=1
+            )
+            if not re.search(r"(?im)^Novel Title:", metadata):
+                metadata = f"Novel Title: {final_title}\n\n" + metadata
+
             save_markdown(OUTPUTS_DIR / "03_metadata.md", metadata)
 
             progress.progress(30)
@@ -1681,7 +1811,7 @@ if page == "Auto Mode - Step 1 to Step 10":
             detected_chapter_count = extract_chapter_count_from_outline(outline)
             chapter_count = max(20, detected_chapter_count or int(fallback_chapter_count))
 
-            status.write(f"Step 5 complete. Detected {detected_chapter_count} chapters from outline. Auto Mode will write {chapter_count} chapters.")
+            status.write(f"Step 5 complete. Detected {detected_chapter_count} chapters. Writing {chapter_count} chapters.")
 
             progress.progress(50)
 
@@ -1724,16 +1854,15 @@ if page == "Auto Mode - Step 1 to Step 10":
                 log_file_name = f"chapter_{chapter_number:02}_log.md"
                 save_markdown(CHAPTERS_DIR / log_file_name, change_log)
 
-
                 chapter_progress = 50 + int((chapter_number / int(chapter_count)) * 20)
                 progress.progress(min(chapter_progress, 70))
 
-            manuscript = get_full_manuscript()
+            manuscript = get_full_manuscript(CHAPTERS_DIR)
 
             # STEP 7 - Final Audit + Auto-Fix
             status.write("Step 7: Running final audit report...")
 
-            manuscript = get_full_manuscript()
+            manuscript = get_full_manuscript(CHAPTERS_DIR)
 
             final_audit = ask_openai(
                 generate_final_audit_prompt(
@@ -1756,23 +1885,25 @@ if page == "Auto Mode - Step 1 to Step 10":
                 ending_text=expanded_ending,
                 outline_text=outline,
                 model=model,
+                chapters_dir=CHAPTERS_DIR,
+                outputs_dir=OUTPUTS_DIR,
                 status=status
             )
 
             save_markdown(OUTPUTS_DIR / "07_final_audit_fixes.md", final_audit_fixes)
 
-            # Refresh manuscript after final fixes
-            manuscript = get_full_manuscript()
+            manuscript = get_full_manuscript(CHAPTERS_DIR)
 
             progress.progress(80)
 
-            status.write("Compiling internal final manuscript DOCX...")
-            selected_pitch_text = selected_pitch
+            status.write("Compiling final manuscript DOCX...")
 
             docx_path = compile_chapters_to_docx(
                 metadata_text=metadata,
-                selected_pitch_text=selected_pitch_text,
-                outline_text=outline
+                selected_pitch_text=selected_pitch,
+                outline_text=outline,
+                chapters_dir=CHAPTERS_DIR,
+                publishing_dir=PUBLISHING_DIR
             )
 
             save_markdown(PUBLISHING_DIR / "final_manuscript_path.txt", str(docx_path))
@@ -1808,25 +1939,27 @@ if page == "Auto Mode - Step 1 to Step 10":
             status.write("Exporting final publishing files...")
 
             exported_files = export_final_publishing_outputs(
-                parent_folder=final_output_parent_folder,
+                parent_folder=str(novel_dir),
                 metadata_text=metadata,
                 selected_pitch_text=selected_pitch,
                 outline_text=outline,
                 cover_prompt=cover_prompt,
                 d2d_metadata=d2d_metadata,
-                youtube_metadata=youtube_metadata
+                youtube_metadata=youtube_metadata,
+                chapters_dir=CHAPTERS_DIR
             )
 
             save_markdown(PUBLISHING_DIR / "final_export_folder.txt", str(exported_files["folder"]))
 
             progress.progress(100)
-
             status.write("Auto Mode complete.")
 
-            st.success("Done. Auto Mode finished Step 1 to Step 10.")
+            st.success(f"Done! Novel saved to: `{novel_dir}`")
 
-            st.subheader("Saved Files")
-            st.markdown("""
+            st.subheader("Output Files")
+            st.markdown(f"""
+                **Novel folder:** `{novel_dir}`
+
                 - `outputs/01_pitch_options_raw.md`
                 - `outputs/01_selected_pitch.md`
                 - `outputs/02_ending_options_raw.md`
@@ -1835,24 +1968,23 @@ if page == "Auto Mode - Step 1 to Step 10":
                 - `outputs/04_characters.md`
                 - `outputs/05_outline.md`
                 - `outputs/07_final_audit.md`
-                - `chapters/chapter_01.md` and onward
+                - `outputs/07_final_audit_fixes.md`
+                - `chapters/chapter_01.md` ... and onward
+                - `chapters/chapter_01_final_log.md` ... and onward
                 - `publishing/08_book_cover_prompt.md`
                 - `publishing/09_draft2digital_metadata.md`
                 - `publishing/10_youtube_metadata.md`
                 - `publishing/final_manuscript.docx`
-                - `outputs/07_final_audit_fixes.md`
-                - `chapters/chapter_01_final_log.md` and onward
-                """)
-            
-            st.subheader("Final Publishing Export Folder")
-            st.write(str(exported_files["folder"]))
+            """)
 
+            st.subheader("Final Publishing Export")
+            st.write(str(exported_files["folder"]))
             st.markdown(f"""
                 - Final Manuscript: `{exported_files["manuscript"]}`
                 - Book Cover Prompt: `{exported_files["cover_prompt"]}`
                 - Draft2Digital Details: `{exported_files["draft2digital"]}`
                 - YouTube Details: `{exported_files["youtube"]}`
-                """)
+            """)
 
             st.subheader("Selected Pitch")
             st.markdown(selected_pitch)
@@ -1862,3 +1994,11 @@ if page == "Auto Mode - Step 1 to Step 10":
 
             st.subheader("Final Audit")
             st.markdown(final_audit)
+
+            # Reset phase flags so a new run can start fresh
+            st.session_state["auto_phase1_done"] = False
+            st.session_state["auto_pitch_chosen"] = False
+            st.session_state["auto_title_approved"] = False
+            st.session_state.pop("auto_show_title_input", None)
+            st.session_state.pop("auto_pitch_options", None)
+            st.session_state.pop("auto_pitch_options_raw", None)
