@@ -2405,10 +2405,16 @@ if page == "Auto Mode - Step 1 to Step 10":
                 st.subheader("Post-Fix Re-Audit Report")
                 st.markdown(pass2_audit_text)
 
-            # Reset phase flags so a new run can start fresh
-            st.session_state["auto_phase1_done"] = False
-            st.session_state["auto_pitch_chosen"] = False
-            st.session_state["auto_title_approved"] = False
-            st.session_state.pop("auto_show_title_input", None)
-            st.session_state.pop("auto_pitch_options", None)
-            st.session_state.pop("auto_pitch_options_raw", None)
+            st.divider()
+            if st.button("🔄 Generate Another Novel", key="generate_again", type="primary"):
+                st.session_state["auto_phase1_done"] = False
+                st.session_state["auto_pitch_chosen"] = False
+                st.session_state["auto_title_approved"] = False
+                st.session_state.pop("auto_show_title_input", None)
+                st.session_state.pop("auto_pitch_options", None)
+                st.session_state.pop("auto_pitch_options_raw", None)
+                st.session_state.pop("auto_selected_pitch", None)
+                st.session_state.pop("auto_detected_title", None)
+                st.session_state.pop("auto_final_title", None)
+                st.session_state.pop("auto_manual_chapter_count", None)
+                st.rerun()
