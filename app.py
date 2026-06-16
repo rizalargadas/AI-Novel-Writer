@@ -483,21 +483,36 @@ def add_markdown_chapter_to_doc(doc, chapter_text, chapter_number, chapter_title
 def get_chapter_title_from_outline(outline_text, chapter_number):
     """
     Pulls chapter title from Step 5 outline.
-    Looks for:
-    Chapter 1 - Title
-    # Chapter 1 - Title
-    ## Chapter 1 - Title
+    Handles all common AI output formats:
+      Chapter 1 - Title
+      ## Chapter 1 - Title
+      ## **Chapter 1 - Title**
+      ## **Chapter 1: Title**
+      Chapter 1 — Title
+      ## Chapter 1
+      **Title**        (title on next line)
     """
 
-    pattern = rf"(?im)^\s*#{0,6}\s*Chapter\s+{chapter_number}\s*[-:—]\s*(.+)$"
+    # Strategy 1: "Chapter N - Title" or "Chapter N: Title" on same line,
+    # with optional leading #s and optional bold markers around any part.
+    pattern = rf"(?im)^\s*\**\s*#{{0,6}}\s*\**\s*Chapter\s+{chapter_number}\s*\**\s*[-:—]\s*\**\s*(.+?)\**\s*$"
     match = re.search(pattern, outline_text)
-
     if match:
         title = match.group(1).strip()
         title = re.sub(r"[*_#\[\]]", "", title).strip()
-
         if title and not re.match(rf"(?i)^chapter\s+{chapter_number}$", title):
             return title
+
+    # Strategy 2: "Chapter N" stands alone on its line (heading only),
+    # then the title appears on the very next non-empty line.
+    pattern2 = rf"(?im)^\s*#{{0,6}}\s*\**\s*Chapter\s+{chapter_number}\s*\**\s*$"
+    match2 = re.search(pattern2, outline_text)
+    if match2:
+        after = outline_text[match2.end():]
+        for line in after.splitlines():
+            clean = re.sub(r"[*_#\[\]]", "", line).strip()
+            if clean and not re.match(rf"(?i)^chapter\s+{chapter_number}$", clean):
+                return clean
 
     return "Untitled"
 
