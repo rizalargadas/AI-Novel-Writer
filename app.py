@@ -1,10 +1,8 @@
 from docx import Document
 from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.style import WD_STYLE_TYPE
 import hashlib
 import re
-import os
 from pathlib import Path
 from dotenv import load_dotenv
 import streamlit as st
@@ -123,6 +121,23 @@ def split_fixed_chapter_and_log(audit_fix_text):
 
     # fallback: keep original output as log if split fails
     return audit_fix_text, "Could not split fixed chapter and change log cleanly."
+
+def split_fixed_chapter_and_final_log(audit_fix_text):
+    """
+    Splits final audit output into fixed chapter and final audit change log.
+    Expected sections:
+    # FIXED CHAPTER
+    # FINAL AUDIT CHANGE LOG
+    """
+    fixed_marker = "# FIXED CHAPTER"
+    log_marker = "# FINAL AUDIT CHANGE LOG"
+
+    if fixed_marker in audit_fix_text and log_marker in audit_fix_text:
+        fixed_part = audit_fix_text.split(fixed_marker, 1)[1].split(log_marker, 1)[0].strip()
+        log_part = audit_fix_text.split(log_marker, 1)[1].strip()
+        return fixed_part, log_part
+
+    return audit_fix_text, "Could not split fixed chapter and final audit change log cleanly."
 
 def extract_recommended_number(text, recommendation_label="OPTION", item_label="OPTION"):
     """
@@ -276,7 +291,12 @@ def generate_metadata_prompt(pitch_text, ending_text):
     return f"""
 Using the story plot and confirmed ending below, create a clean Markdown metadata file.
 
-Include:
+IMPORTANT:
+Start the file with this exact field:
+
+Novel Title: [Insert the final commercial novel title]
+
+Then include:
 
 1. Target Audience
 Give a one-sentence explanation of the target audience.
@@ -343,26 +363,63 @@ Okafor, Marcus, Voss, Osei, Wren, Calloway, Soren, Sable, Chen, Mara, Dale, Vera
 Format as a clean Markdown reference document.
 """
 
-def extract_title_from_metadata(metadata_text):
+def extract_title_from_metadata(metadata_text, selected_pitch_text=""):
     """
-    Tries to find a title from metadata.
-    Falls back to Untitled Novel.
+    Extracts the real novel title.
+    Priority:
+    1. Novel Title from metadata
+    2. Title from selected pitch
+    3. Other title fields
+    4. Fallback
     """
-    patterns = [
-        r"(?im)^#\s*(.+)$",
+
+    metadata_patterns = [
+        r"(?im)^Novel Title:\s*(.+)$",
+        r"(?im)^\*\*Novel Title:\*\*\s*(.+)$",
+        r"(?im)^Book Title:\s*(.+)$",
+        r"(?im)^\*\*Book Title:\*\*\s*(.+)$",
         r"(?im)^Title:\s*(.+)$",
-        r"(?im)^\*\*Title:\*\*\s*(.+)$"
+        r"(?im)^\*\*Title:\*\*\s*(.+)$",
     ]
 
-    for pattern in patterns:
+    for pattern in metadata_patterns:
         match = re.search(pattern, metadata_text)
         if match:
-            title = match.group(1).strip()
-            title = re.sub(r"[*_#]", "", title).strip()
+            title = clean_title_text(match.group(1))
+            if title and title.lower() not in ["story metadata", "metadata"]:
+                return title
+
+    pitch_patterns = [
+        r"(?im)^Title:\s*(.+)$",
+        r"(?im)^\*\*Title:\*\*\s*(.+)$",
+    ]
+
+    for pattern in pitch_patterns:
+        match = re.search(pattern, selected_pitch_text)
+        if match:
+            title = clean_title_text(match.group(1))
             if title:
                 return title
 
     return "Untitled Novel"
+
+
+def clean_title_text(title):
+    """
+    Cleans markdown and placeholder text from title.
+    """
+    title = re.sub(r"[*_#\[\]]", "", title).strip()
+    title = title.replace("Insert the final commercial novel title", "").strip()
+    title = title.strip(":-— ")
+    return title
+
+def safe_folder_name(name):
+    """
+    Makes a safe Windows folder name from the novel title.
+    """
+    name = re.sub(r'[<>:"/\\|?*]', "", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    return name or "Untitled Novel"
 
 
 def detect_author_name(metadata_text):
@@ -379,12 +436,19 @@ def detect_author_name(metadata_text):
     return "AERESSA"
 
 
-def add_markdown_chapter_to_doc(doc, chapter_text):
+def add_markdown_chapter_to_doc(doc, chapter_text, chapter_number, chapter_title):
     """
-    Adds markdown-ish chapter content into DOCX.
-    Lines starting with # become Heading 1.
-    Other text becomes normal paragraphs.
+    Adds one chapter to DOCX.
+    Always creates the official chapter title as H1:
+    Chapter 1 - Title
+
+    It skips all existing chapter heading lines inside the chapter text,
+    whether they are H1, H2, or plain text.
     """
+
+    official_title = f"Chapter {chapter_number} - {chapter_title}".strip(" -")
+    doc.add_heading(official_title, level=1)
+
     lines = chapter_text.splitlines()
 
     for line in lines:
@@ -393,26 +457,56 @@ def add_markdown_chapter_to_doc(doc, chapter_text):
         if not clean_line:
             continue
 
-        if clean_line.startswith("# "):
-            title = clean_line.replace("# ", "", 1).strip()
-            doc.add_heading(title, level=1)
+        # Skip existing chapter title lines like:
+        # # Chapter 1 - Title
+        # ## Chapter 1 - Title
+        # Chapter 1 - Title
+        if re.match(r"(?i)^\s*#{0,6}\s*Chapter\s+\d+\b", clean_line):
+            continue
+
+        if clean_line.startswith("### "):
+            doc.add_heading(clean_line.replace("### ", "", 1).strip(), level=3)
         elif clean_line.startswith("## "):
-            title = clean_line.replace("## ", "", 1).strip()
-            doc.add_heading(title, level=2)
+            doc.add_heading(clean_line.replace("## ", "", 1).strip(), level=2)
+        elif clean_line.startswith("# "):
+            doc.add_heading(clean_line.replace("# ", "", 1).strip(), level=2)
         else:
             para = doc.add_paragraph(clean_line)
             para.style = doc.styles["Normal"]
 
+def get_chapter_title_from_outline(outline_text, chapter_number):
+    """
+    Pulls chapter title from Step 5 outline.
+    Looks for:
+    Chapter 1 - Title
+    # Chapter 1 - Title
+    ## Chapter 1 - Title
+    """
 
-def compile_chapters_to_docx(metadata_text):
+    pattern = rf"(?im)^\s*#{0,6}\s*Chapter\s+{chapter_number}\s*[-:—]\s*(.+)$"
+    match = re.search(pattern, outline_text)
+
+    if match:
+        title = match.group(1).strip()
+        title = re.sub(r"[*_#\[\]]", "", title).strip()
+
+        if title and not re.match(rf"(?i)^chapter\s+{chapter_number}$", title):
+            return title
+
+    return "Untitled"
+
+def compile_chapters_to_docx(metadata_text, selected_pitch_text="", outline_text="", output_path=None):
     """
     Compiles all chapter_XX.md files into one formatted DOCX.
-    Creates:
-    publishing/final_manuscript.docx
+    Ensures:
+    - Correct novel title
+    - 'by Author Name'
+    - Every chapter title is H1
+    - Chapter number/title comes from Step 5 outline when possible
     """
+
     doc = Document()
 
-    # Styles
     styles = doc.styles
 
     normal_style = styles["Normal"]
@@ -424,7 +518,7 @@ def compile_chapters_to_docx(metadata_text):
     heading1.font.size = Pt(20)
     heading1.font.bold = True
 
-    novel_title = extract_title_from_metadata(metadata_text)
+    novel_title = extract_title_from_metadata(metadata_text, selected_pitch_text)
     author_name = detect_author_name(metadata_text)
 
     # Front page
@@ -437,32 +531,125 @@ def compile_chapters_to_docx(metadata_text):
 
     author_para = doc.add_paragraph()
     author_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    author_run = author_para.add_run(author_name)
+    author_run = author_para.add_run(f"by {author_name}")
     author_run.font.name = "Garamond"
     author_run.font.size = Pt(18)
 
     doc.add_page_break()
 
-    # Chapters
     chapter_files = sorted(CHAPTERS_DIR.glob("chapter_*.md"))
 
-    # Exclude log files
     chapter_files = [
         file for file in chapter_files
         if not file.name.endswith("_log.md")
     ]
 
     for index, chapter_file in enumerate(chapter_files):
+        chapter_match = re.search(r"chapter_(\d+)\.md", chapter_file.name, re.I)
+        chapter_number = int(chapter_match.group(1)) if chapter_match else index + 1
+
+        chapter_title = get_chapter_title_from_outline(outline_text, chapter_number)
+
         chapter_text = chapter_file.read_text(encoding="utf-8")
-        add_markdown_chapter_to_doc(doc, chapter_text)
+        add_markdown_chapter_to_doc(doc, chapter_text, chapter_number, chapter_title)
 
         if index < len(chapter_files) - 1:
             doc.add_page_break()
 
-    output_path = PUBLISHING_DIR / "final_manuscript.docx"
+    if output_path is None:
+        output_path = PUBLISHING_DIR / "final_manuscript.docx"
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
     doc.save(output_path)
 
     return output_path
+
+def save_text_as_docx(text, output_path, title=None):
+    """
+    Saves markdown-ish text into a simple DOCX.
+    """
+
+    doc = Document()
+
+    styles = doc.styles
+    normal_style = styles["Normal"]
+    normal_style.font.name = "Garamond"
+    normal_style.font.size = Pt(12)
+
+    if title:
+        heading = doc.add_heading(title, level=1)
+        heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    for line in text.splitlines():
+        clean_line = line.strip()
+
+        if not clean_line:
+            continue
+
+        if clean_line.startswith("### "):
+            doc.add_heading(clean_line.replace("### ", "", 1).strip(), level=3)
+        elif clean_line.startswith("## "):
+            doc.add_heading(clean_line.replace("## ", "", 1).strip(), level=2)
+        elif clean_line.startswith("# "):
+            doc.add_heading(clean_line.replace("# ", "", 1).strip(), level=1)
+        else:
+            doc.add_paragraph(clean_line)
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(output_path)
+
+    return output_path
+
+def export_final_publishing_outputs(parent_folder, metadata_text, selected_pitch_text, outline_text, cover_prompt, d2d_metadata, youtube_metadata):
+    """
+    Exports the 4 final publishing files into:
+    [chosen parent folder] / [Novel Title] /
+
+    Outputs:
+    - final full novel .docx
+    - book cover prompt .txt
+    - Draft2Digital details .docx
+    - YouTube details .docx
+    """
+
+    novel_title = extract_title_from_metadata(metadata_text, selected_pitch_text)
+    novel_folder_name = safe_folder_name(novel_title)
+
+    export_dir = Path(parent_folder) / novel_folder_name
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    manuscript_path = compile_chapters_to_docx(
+        metadata_text=metadata_text,
+        selected_pitch_text=selected_pitch_text,
+        outline_text=outline_text,
+        output_path=export_dir / f"{novel_folder_name} - Final Manuscript.docx"
+    )
+
+    cover_path = export_dir / f"{novel_folder_name} - Book Cover Prompt.txt"
+    cover_path.write_text(cover_prompt, encoding="utf-8")
+
+    d2d_path = save_text_as_docx(
+        d2d_metadata,
+        export_dir / f"{novel_folder_name} - Draft2Digital Details.docx",
+        title="Draft2Digital Details"
+    )
+
+    youtube_path = save_text_as_docx(
+        youtube_metadata,
+        export_dir / f"{novel_folder_name} - YouTube Details.docx",
+        title="YouTube Details"
+    )
+
+    return {
+        "folder": export_dir,
+        "manuscript": manuscript_path,
+        "cover_prompt": cover_path,
+        "draft2digital": d2d_path,
+        "youtube": youtube_path,
+    }
 
 def generate_chapter_audit_and_fix_prompt(chapter_number, chapter_text, metadata_text, character_text, ending_text, outline_text):
     return f"""
@@ -713,6 +900,124 @@ MANUSCRIPT:
 {manuscript_text}
 """
 
+def generate_final_audit_and_fix_prompt(chapter_number, chapter_text, metadata_text, character_text, ending_text, outline_text, full_manuscript_text):
+    return f"""
+You are a professional developmental editor and final manuscript continuity fixer.
+
+This is the final audit pass for the full novel.
+
+Your task:
+Audit Chapter {chapter_number} against the FULL MANUSCRIPT and project files.
+If this chapter has any issue that affects publishing readiness, fix the chapter directly.
+
+Your output must have exactly two sections:
+
+# FIXED CHAPTER
+
+[Write the complete corrected chapter here.]
+
+# FINAL AUDIT CHANGE LOG
+
+List every final-audit fix made to this chapter.
+
+For each fix, include:
+- Original problem
+- Fix applied
+- Why the fix was necessary
+
+If no final-audit issues are found, keep the chapter unchanged and say:
+No final-audit issues found. Chapter retained as-is.
+
+Check especially for:
+- Cross-chapter continuity errors
+- Timeline problems
+- Repeated or missing reveals
+- Character motivation inconsistencies
+- Relationship arc inconsistencies
+- Chapter ending/beginning flow problems
+- Setup/payoff issues
+- Contradictions with the confirmed ending
+- Incorrect names, ages, locations, relationship details
+- Any remaining chapter title problems
+- Any obvious publishing-readiness issue
+
+PROJECT FILES:
+
+METADATA:
+{metadata_text}
+
+CHARACTER PROFILES:
+{character_text}
+
+CONFIRMED ENDING:
+{ending_text}
+
+OUTLINE:
+{outline_text}
+
+FULL MANUSCRIPT:
+{full_manuscript_text}
+
+CHAPTER TO FIX:
+{chapter_text}
+"""
+
+def final_audit_and_fix_all_chapters(metadata_text, character_text, ending_text, outline_text, model, status=None):
+    """
+    Runs a final audit/fix pass across all chapter files.
+    Updates chapter files directly.
+    Saves final audit fix logs.
+    """
+
+    chapter_files = sorted(CHAPTERS_DIR.glob("chapter_*.md"))
+
+    chapter_files = [
+        file for file in chapter_files
+        if not file.name.endswith("_log.md") and not file.name.endswith("_final_log.md")
+    ]
+
+    full_manuscript_text = get_full_manuscript()
+    final_logs = []
+
+    for index, chapter_file in enumerate(chapter_files, start=1):
+        chapter_match = re.search(r"chapter_(\d+)\.md", chapter_file.name, re.I)
+        chapter_number = int(chapter_match.group(1)) if chapter_match else index
+
+        if status:
+            status.write(f"Step 7: Final auditing and fixing Chapter {chapter_number}...")
+
+        chapter_text = chapter_file.read_text(encoding="utf-8")
+
+        audit_fix_result = ask_openai(
+            generate_final_audit_and_fix_prompt(
+                chapter_number=chapter_number,
+                chapter_text=chapter_text,
+                metadata_text=metadata_text,
+                character_text=character_text,
+                ending_text=ending_text,
+                outline_text=outline_text,
+                full_manuscript_text=full_manuscript_text
+            ),
+            model=model
+        )
+
+        fixed_chapter, final_change_log = split_fixed_chapter_and_final_log(audit_fix_result)
+
+        chapter_file.write_text(fixed_chapter, encoding="utf-8")
+
+        final_log_file = CHAPTERS_DIR / f"chapter_{chapter_number:02}_final_log.md"
+        final_log_file.write_text(final_change_log, encoding="utf-8")
+
+        final_logs.append(f"# Chapter {chapter_number} Final Audit Log\n\n{final_change_log}")
+
+        # Refresh manuscript after each chapter fix so later chapters compare against updated text
+        full_manuscript_text = get_full_manuscript()
+
+    combined_final_log = "\n\n".join(final_logs)
+    save_markdown(OUTPUTS_DIR / "07_final_audit_fixes.md", combined_final_log)
+
+    return combined_final_log
+
 
 def generate_cover_prompt(metadata_text, character_text):
     return f"""
@@ -873,9 +1178,15 @@ Output as clean Markdown.
 
 def get_full_manuscript():
     """
-    Combines all chapter files into one manuscript string.
+    Combines all real chapter files into one manuscript string.
+    Excludes audit/change log files.
     """
     chapter_files = sorted(CHAPTERS_DIR.glob("chapter_*.md"))
+
+    chapter_files = [
+        file for file in chapter_files
+        if not file.name.endswith("_log.md")
+    ]
 
     manuscript_parts = []
 
@@ -883,6 +1194,14 @@ def get_full_manuscript():
         manuscript_parts.append(chapter_file.read_text(encoding="utf-8"))
 
     return "\n\n".join(manuscript_parts)
+
+def clear_generated_chapters():
+    """
+    Deletes old generated chapter and chapter log files before a fresh Auto Mode run.
+    Prevents old project chapters from being compiled into the new manuscript.
+    """
+    for file in CHAPTERS_DIR.glob("chapter_*.md"):
+        file.unlink()
 
 def extract_chapter_count_from_outline(outline_text):
     """
@@ -1193,11 +1512,17 @@ if page == "Step 6 - Write Chapter":
 
     if st.button("Compile All Chapters to DOCX"):
         metadata_text = read_markdown(OUTPUTS_DIR / "03_metadata.md")
+        selected_pitch_text = read_markdown(OUTPUTS_DIR / "01_selected_pitch.md")
+        outline_text = read_markdown(OUTPUTS_DIR / "05_outline.md")
 
         if not metadata_text.strip():
             st.error("Metadata missing. Generate Step 3 first.")
         else:
-            docx_path = compile_chapters_to_docx(metadata_text)
+            docx_path = compile_chapters_to_docx(
+                metadata_text=metadata_text,
+                selected_pitch_text=selected_pitch_text,
+                outline_text=outline_text
+            )
             st.success(f"Compiled manuscript saved to {docx_path}")
 
 if page == "Auto Mode - Step 1 to Step 10":
@@ -1240,6 +1565,12 @@ if page == "Auto Mode - Step 1 to Step 10":
         step=1
     )
 
+    final_output_parent_folder = st.text_input(
+        "Final publishing output folder",
+        value=str((BASE_DIR / "final_exports").resolve()),
+        help="Paste the folder path where you want the final publishing files saved."
+    )
+
     run_auto = st.button("Run Auto Mode from Step 1 to Step 10")
 
     if run_auto:
@@ -1250,6 +1581,8 @@ if page == "Auto Mode - Step 1 to Step 10":
         else:
             progress = st.progress(0)
             status = st.empty()
+
+            clear_generated_chapters()
 
             # STEP 1 - Pitch Maker
             status.write("Step 1: Generating pitch options...")
@@ -1271,6 +1604,10 @@ if page == "Auto Mode - Step 1 to Step 10":
                 recommended_pitch_number,
                 label="OPTION"
             )
+
+            if not selected_pitch.strip():
+                st.error("Auto Mode stopped: could not detect a selected pitch from Step 1.")
+                st.stop()
 
             save_markdown(OUTPUTS_DIR / "01_pitch_options_raw.md", pitch_options_raw)
             save_markdown(OUTPUTS_DIR / "01_selected_pitch.md", selected_pitch)
@@ -1297,6 +1634,10 @@ if page == "Auto Mode - Step 1 to Step 10":
                 recommended_ending_number,
                 label="ENDING"
             )
+
+            if not selected_ending.strip():
+                st.error("Auto Mode stopped: could not detect a selected ending from Step 2.")
+                st.stop()
 
             status.write("Step 2: Expanding selected ending...")
             expanded_ending = ask_openai(
@@ -1389,8 +1730,11 @@ if page == "Auto Mode - Step 1 to Step 10":
 
             manuscript = get_full_manuscript()
 
-            # STEP 7 - Final Audit
-            status.write("Step 7: Running final audit...")
+            # STEP 7 - Final Audit + Auto-Fix
+            status.write("Step 7: Running final audit report...")
+
+            manuscript = get_full_manuscript()
+
             final_audit = ask_openai(
                 generate_final_audit_prompt(
                     metadata,
@@ -1401,12 +1745,36 @@ if page == "Auto Mode - Step 1 to Step 10":
                 ),
                 model=model
             )
+
             save_markdown(OUTPUTS_DIR / "07_final_audit.md", final_audit)
+
+            status.write("Step 7: Auto-fixing final manuscript issues chapter by chapter...")
+
+            final_audit_fixes = final_audit_and_fix_all_chapters(
+                metadata_text=metadata,
+                character_text=characters,
+                ending_text=expanded_ending,
+                outline_text=outline,
+                model=model,
+                status=status
+            )
+
+            save_markdown(OUTPUTS_DIR / "07_final_audit_fixes.md", final_audit_fixes)
+
+            # Refresh manuscript after final fixes
+            manuscript = get_full_manuscript()
 
             progress.progress(80)
 
-            status.write("Compiling final manuscript DOCX...")
-            docx_path = compile_chapters_to_docx(metadata)
+            status.write("Compiling internal final manuscript DOCX...")
+            selected_pitch_text = selected_pitch
+
+            docx_path = compile_chapters_to_docx(
+                metadata_text=metadata,
+                selected_pitch_text=selected_pitch_text,
+                outline_text=outline
+            )
+
             save_markdown(PUBLISHING_DIR / "final_manuscript_path.txt", str(docx_path))
 
             # STEP 8 - Book Cover Prompt
@@ -1437,6 +1805,20 @@ if page == "Auto Mode - Step 1 to Step 10":
             )
             save_markdown(PUBLISHING_DIR / "10_youtube_metadata.md", youtube_metadata)
 
+            status.write("Exporting final publishing files...")
+
+            exported_files = export_final_publishing_outputs(
+                parent_folder=final_output_parent_folder,
+                metadata_text=metadata,
+                selected_pitch_text=selected_pitch,
+                outline_text=outline,
+                cover_prompt=cover_prompt,
+                d2d_metadata=d2d_metadata,
+                youtube_metadata=youtube_metadata
+            )
+
+            save_markdown(PUBLISHING_DIR / "final_export_folder.txt", str(exported_files["folder"]))
+
             progress.progress(100)
 
             status.write("Auto Mode complete.")
@@ -1458,6 +1840,18 @@ if page == "Auto Mode - Step 1 to Step 10":
                 - `publishing/09_draft2digital_metadata.md`
                 - `publishing/10_youtube_metadata.md`
                 - `publishing/final_manuscript.docx`
+                - `outputs/07_final_audit_fixes.md`
+                - `chapters/chapter_01_final_log.md` and onward
+                """)
+            
+            st.subheader("Final Publishing Export Folder")
+            st.write(str(exported_files["folder"]))
+
+            st.markdown(f"""
+                - Final Manuscript: `{exported_files["manuscript"]}`
+                - Book Cover Prompt: `{exported_files["cover_prompt"]}`
+                - Draft2Digital Details: `{exported_files["draft2digital"]}`
+                - YouTube Details: `{exported_files["youtube"]}`
                 """)
 
             st.subheader("Selected Pitch")
