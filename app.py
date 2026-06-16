@@ -148,28 +148,42 @@ def extract_recommended_number(text, recommendation_label="OPTION", item_label="
     """
     Finds the recommended option/ending number from AI output.
 
-    Example:
-    RECOMMENDED OPTION:
-    Option 4 is the strongest...
+    Fixes two bugs in the original:
+    1. Backreference trap — AI mentions "Option 1" in reasoning before naming the winner,
+       so the first-match regex always returns 1.
+    2. Bare number — AI writes "RECOMMENDED OPTION: 3" with no "Option" word → returned None → fell back to index 0 = Option 1.
 
-    RECOMMENDED ENDING:
-    Ending 10 is the strongest...
+    Strategy:
+    1. Strong signal phrases first ("I recommend Option 4", "Option 4 is the strongest")
+    2. Last-mentioned option number (AI's actual pick is named last in its reasoning)
+    3. Bare number directly after the label
     """
     recommended_section = re.search(
-        rf"(?is)RECOMMENDED\s+{recommendation_label}\s*:.*",
+        rf"(?is)RECOMMENDED\s+{recommendation_label}\s*:(.*)",
         text
     )
-
     if not recommended_section:
         return None
 
-    match = re.search(
-        rf"(?i)\b{item_label}\s+(\d+)\b",
-        recommended_section.group(0)
-    )
+    rec_text = recommended_section.group(1).strip()
 
-    if match:
-        return int(match.group(1))
+    # Strategy 1: Strong recommendation signal before the option number
+    strong_match = re.search(
+        rf"(?i)(?:recommend|strongest|best|top pick|go with|choose|suggest|pick|winner)[^\n]*?\b{item_label}\s+(\d+)\b",
+        rec_text
+    )
+    if strong_match:
+        return int(strong_match.group(1))
+
+    # Strategy 2: Last-mentioned option number in the recommendation text
+    all_matches = list(re.finditer(rf"(?i)\b{item_label}\s+(\d+)\b", rec_text))
+    if all_matches:
+        return int(all_matches[-1].group(1))
+
+    # Strategy 3: Bare number directly after the label (e.g. "RECOMMENDED OPTION: 3")
+    bare = re.match(r"\s*(\d+)", rec_text)
+    if bare:
+        return int(bare.group(1))
 
     return None
 
