@@ -1,3 +1,7 @@
+from docx import Document
+from docx.shared import Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.style import WD_STYLE_TYPE
 import hashlib
 import re
 import os
@@ -101,6 +105,24 @@ def split_options(text, label="OPTION"):
     clean_parts = [match.group(0).strip() for match in matches]
 
     return clean_parts
+
+def split_fixed_chapter_and_log(audit_fix_text):
+    """
+    Splits AI output into fixed chapter and change log.
+    Expected sections:
+    # FIXED CHAPTER
+    # CHANGE LOG
+    """
+    fixed_marker = "# FIXED CHAPTER"
+    log_marker = "# CHANGE LOG"
+
+    if fixed_marker in audit_fix_text and log_marker in audit_fix_text:
+        fixed_part = audit_fix_text.split(fixed_marker, 1)[1].split(log_marker, 1)[0].strip()
+        log_part = audit_fix_text.split(log_marker, 1)[1].strip()
+        return fixed_part, log_part
+
+    # fallback: keep original output as log if split fails
+    return audit_fix_text, "Could not split fixed chapter and change log cleanly."
 
 def extract_recommended_number(text, recommendation_label="OPTION", item_label="OPTION"):
     """
@@ -321,6 +343,184 @@ Okafor, Marcus, Voss, Osei, Wren, Calloway, Soren, Sable, Chen, Mara, Dale, Vera
 Format as a clean Markdown reference document.
 """
 
+def extract_title_from_metadata(metadata_text):
+    """
+    Tries to find a title from metadata.
+    Falls back to Untitled Novel.
+    """
+    patterns = [
+        r"(?im)^#\s*(.+)$",
+        r"(?im)^Title:\s*(.+)$",
+        r"(?im)^\*\*Title:\*\*\s*(.+)$"
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, metadata_text)
+        if match:
+            title = match.group(1).strip()
+            title = re.sub(r"[*_#]", "", title).strip()
+            if title:
+                return title
+
+    return "Untitled Novel"
+
+
+def detect_author_name(metadata_text):
+    """
+    Uses AERESSA for WLW/sapphic/lesbian stories.
+    Uses VoidAndVelvet for MLM/gay male stories.
+    Defaults to AERESSA.
+    """
+    text = metadata_text.lower()
+
+    if any(word in text for word in ["mlm", "gay male", "men loving men", "male/male"]):
+        return "VoidAndVelvet"
+
+    return "AERESSA"
+
+
+def add_markdown_chapter_to_doc(doc, chapter_text):
+    """
+    Adds markdown-ish chapter content into DOCX.
+    Lines starting with # become Heading 1.
+    Other text becomes normal paragraphs.
+    """
+    lines = chapter_text.splitlines()
+
+    for line in lines:
+        clean_line = line.strip()
+
+        if not clean_line:
+            continue
+
+        if clean_line.startswith("# "):
+            title = clean_line.replace("# ", "", 1).strip()
+            doc.add_heading(title, level=1)
+        elif clean_line.startswith("## "):
+            title = clean_line.replace("## ", "", 1).strip()
+            doc.add_heading(title, level=2)
+        else:
+            para = doc.add_paragraph(clean_line)
+            para.style = doc.styles["Normal"]
+
+
+def compile_chapters_to_docx(metadata_text):
+    """
+    Compiles all chapter_XX.md files into one formatted DOCX.
+    Creates:
+    publishing/final_manuscript.docx
+    """
+    doc = Document()
+
+    # Styles
+    styles = doc.styles
+
+    normal_style = styles["Normal"]
+    normal_style.font.name = "Garamond"
+    normal_style.font.size = Pt(12)
+
+    heading1 = styles["Heading 1"]
+    heading1.font.name = "Garamond"
+    heading1.font.size = Pt(20)
+    heading1.font.bold = True
+
+    novel_title = extract_title_from_metadata(metadata_text)
+    author_name = detect_author_name(metadata_text)
+
+    # Front page
+    title_para = doc.add_paragraph()
+    title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    title_run = title_para.add_run(novel_title)
+    title_run.bold = True
+    title_run.font.name = "Cinzel"
+    title_run.font.size = Pt(40)
+
+    author_para = doc.add_paragraph()
+    author_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    author_run = author_para.add_run(author_name)
+    author_run.font.name = "Garamond"
+    author_run.font.size = Pt(18)
+
+    doc.add_page_break()
+
+    # Chapters
+    chapter_files = sorted(CHAPTERS_DIR.glob("chapter_*.md"))
+
+    # Exclude log files
+    chapter_files = [
+        file for file in chapter_files
+        if not file.name.endswith("_log.md")
+    ]
+
+    for index, chapter_file in enumerate(chapter_files):
+        chapter_text = chapter_file.read_text(encoding="utf-8")
+        add_markdown_chapter_to_doc(doc, chapter_text)
+
+        if index < len(chapter_files) - 1:
+            doc.add_page_break()
+
+    output_path = PUBLISHING_DIR / "final_manuscript.docx"
+    doc.save(output_path)
+
+    return output_path
+
+def generate_chapter_audit_and_fix_prompt(chapter_number, chapter_text, metadata_text, character_text, ending_text, outline_text):
+    return f"""
+You are a professional fiction continuity editor and prose revision specialist.
+
+Audit Chapter {chapter_number} against the project files.
+
+If you find errors, contradictions, weak prose, missing emotional stakes, timeline issues, or craft issues, fix them directly.
+
+Your output must have exactly two sections:
+
+# FIXED CHAPTER
+
+[Write the complete corrected chapter here.]
+
+# CHANGE LOG
+
+List every meaningful fix made.
+
+For each fix, include:
+- Original problem
+- Fix applied
+- Why the fix was necessary
+
+Check for:
+- Plot continuity issues
+- Character consistency issues
+- Timeline problems
+- Logic problems
+- Contradictions with metadata, character profiles, ending, or outline
+- Weak prose
+- Emotion-labeling instead of showing
+- On-the-nose dialogue
+- Chapter padding
+- Missing emotional stakes
+- Robotic rhythm
+- Adjective stacking
+
+If no issues are found, keep the chapter unchanged and say in the change log:
+No major issues found. Chapter retained as originally drafted.
+
+PROJECT FILES:
+
+METADATA:
+{metadata_text}
+
+CHARACTER PROFILES:
+{character_text}
+
+CONFIRMED ENDING:
+{ending_text}
+
+OUTLINE:
+{outline_text}
+
+CHAPTER TEXT:
+{chapter_text}
+"""
 
 def generate_outline_prompt(metadata_text, character_text, ending_text):
     return f"""
@@ -336,6 +536,14 @@ Based on the story materials below, choose the strongest story structure from:
 - Seven-Point Story Structure
 
 Then create a chapter-by-chapter outline.
+
+IMPORTANT:
+- The outline must have at least 20 chapters.
+- If the story needs more than 20 chapters, create more.
+- Each chapter heading must start with this exact format:
+Chapter 1 - [Chapter Title]
+Chapter 2 - [Chapter Title]
+Chapter 3 - [Chapter Title]
 
 Each chapter should include:
 - Hooky chapter title
@@ -374,6 +582,14 @@ Confirmed Ending:
 Outline:
 {outline_text}
 
+{WRITING_PHILOSOPHY}
+
+PRE-WRITING REVIEW:
+Before writing, silently answer:
+- What is the emotional core of this chapter?
+- What does the reader need to feel by the end?
+- What changes emotionally between the beginning and end of this chapter?
+
 WRITING RULES:
 - Write only the chapter.
 - Format the chapter name as H1, example: # Chapter {chapter_number} - Chapter Title
@@ -386,6 +602,302 @@ WRITING RULES:
 - Mature scenes are permitted, but do not write erotica.
 """
 
+def generate_chapter_audit_prompt(chapter_number, chapter_text, metadata_text, character_text, ending_text, outline_text):
+    return f"""
+You are a professional fiction continuity editor and prose quality auditor.
+
+Audit Chapter {chapter_number} against the project files.
+
+Check for:
+- Plot continuity issues
+- Character consistency issues
+- Timeline problems
+- Logic problems
+- Contradictions with metadata, character profiles, ending, or outline
+- Weak prose
+- Emotion-labeling instead of showing
+- On-the-nose dialogue
+- Chapter padding
+- Missing emotional stakes
+- Robotic rhythm
+- Adjective stacking
+
+If no major issues are found, say the chapter is ready.
+
+Create a clean Markdown change log with:
+
+# Chapter {chapter_number} Audit Log
+
+## Status
+Ready / Needs Revision
+
+## Issues Found
+List issues clearly.
+
+## Recommended Fixes
+List fixes clearly.
+
+## Notes
+One short publishing-readiness note.
+
+PROJECT FILES:
+
+METADATA:
+{metadata_text}
+
+CHARACTER PROFILES:
+{character_text}
+
+CONFIRMED ENDING:
+{ending_text}
+
+OUTLINE:
+{outline_text}
+
+CHAPTER TEXT:
+{chapter_text}
+"""
+
+def pick_recommended_option(options, recommended_number, label):
+    """
+    Picks the recommended option if found.
+    Otherwise, returns the first option.
+    """
+    if recommended_number:
+        for option in options:
+            if re.search(rf"(?i)^{label}\s+{recommended_number}\b", option.strip()):
+                return option
+
+    return options[0] if options else ""
+
+
+def generate_final_audit_prompt(metadata_text, character_text, ending_text, outline_text, manuscript_text):
+    return f"""
+You are a professional developmental editor and publishing-readiness auditor.
+
+Perform a deep final audit of this novel.
+
+Check for:
+- Plot continuity
+- Character consistency
+- Timeline issues
+- Contradictions
+- Emotional arc problems
+- Weak scenes
+- Missing setup or payoff
+- Names that conflict with the character profiles
+- Publishing readiness
+
+Do not rewrite the full manuscript.
+Create a clear Markdown audit report with:
+- Overall readiness score out of 100
+- Critical issues
+- Moderate issues
+- Minor issues
+- Specific chapter-level fixes needed
+- Final publishing recommendation
+
+METADATA:
+{metadata_text}
+
+CHARACTER PROFILES:
+{character_text}
+
+CONFIRMED ENDING:
+{ending_text}
+
+OUTLINE:
+{outline_text}
+
+MANUSCRIPT:
+{manuscript_text}
+"""
+
+
+def generate_cover_prompt(metadata_text, character_text):
+    return f"""
+Create a book cover prompt for this novel.
+
+Use this format:
+
+Author Name: [VoidAndVelvet if MLM | AERESSA if WLW or others]
+
+Please draw a book cover. It should have the title and the author name. Add enough space between text and the edge for print bleed.
+
+TITLE:
+[Insert title]
+
+The story is about:
+[Insert short description]
+
+Book Cover Size: Portrait 6x9
+
+PRIMARY Characters:
+[Insert lead character 1: name, short description, physical description]
+[Insert lead character 2: name, short description, physical description]
+[Insert lead character 3 if applicable]
+[Insert lead character 4 if applicable]
+
+Additional Note:
+The cover should be obviously LGBTQ+ and clearly match the story genre.
+
+Art Style:
+Semi-realistic digital illustration
+
+Use the materials below.
+
+METADATA:
+{metadata_text}
+
+CHARACTER PROFILES:
+{character_text}
+"""
+
+
+def generate_draft2digital_prompt(manuscript_text, metadata_text):
+    return f"""
+Using the manuscript and metadata below, create complete SEO-optimized Draft2Digital publishing metadata.
+
+Provide:
+
+1. Short Description
+- Single paragraph
+- 50 to 400 characters
+- No ending spoilers
+
+2. Long Description
+- Compelling book blurb
+- Start with a hook
+- Build tension and intrigue
+- Introduce main characters and conflict
+- Do not spoil the ending
+- Do not mention other author names
+- No trope lists, bullets, tags, keywords, content warnings, or extra metadata inside the long description
+
+3. SEO Keywords
+- 30 total
+- Primary Keywords: 7
+- Secondary Keywords: 13
+- Long-Tail Keywords: 10
+
+4. Maturity Level
+Choose one:
+- My book does NOT contain content inappropriate for minors.
+- My book DOES contain content inappropriate for minors.
+If considered erotica, say so.
+
+5. BISAC Categories
+Provide 5 total with full category codes and names.
+
+6. Pricing Recommendation
+Include ebook pricing suggestion, library pricing suggestion, and print pricing note.
+
+Use clear Markdown headers.
+
+METADATA:
+{metadata_text}
+
+MANUSCRIPT:
+{manuscript_text}
+"""
+
+
+def generate_youtube_prompt(manuscript_text, metadata_text):
+    return f"""
+Act as a YouTube SEO specialist with expertise in audiobook marketing and LGBTQ+ romance content discovery.
+
+Create comprehensive YouTube metadata optimized for discovery and click-through rate.
+
+Input:
+METADATA:
+{metadata_text}
+
+MANUSCRIPT:
+{manuscript_text}
+
+Create:
+
+1. THREE TITLE VARIATIONS
+Max 100 characters each.
+- Version A: Search-optimized
+- Version B: Trope-focused
+- Version C: Full audiobook / audiobook to listen for sleep
+
+The audiobook title must appear at the beginning if possible.
+
+2. YOUTUBE DESCRIPTION
+
+Description must start exactly with:
+
+Get E-book Version: [LINK TO FOLLOW]
+Buy Me a Coffee: https://buymeacoffee.com/aeressa
+
+Then include:
+- Short story overview, 3 to 5 short paragraphs, no spoilers
+- Call to action
+- Subscribe prompt
+- Comment prompt asking about favorite moment
+- Content warning in this format:
+⚠️ Content includes: [warnings separated by commas]
+- Hashtags, 10 to 15, at the very end
+
+Use --- as horizontal separators between major description blocks.
+Do not use --- between the two top links.
+
+3. TWENTY SEO-OPTIMIZED TAGS
+Comma-separated.
+No hashtag symbols.
+Include:
+- 5 broad genre tags
+- 5 specific trope tags
+- 5 niche/subgenre tags
+- 5 search behavior tags
+
+4. PLAYLIST ASSIGNMENT
+Choose from:
+- MLM Romance Audiobook
+- Sapphic Romance Audiobook
+- Trans Romance Audiobooks
+- Bisexual & Pansexual Romance Audiobooks
+- Non-Binary Romance Audiobooks
+- Polyamorous Queer Romance Audiobooks
+- Asexual & Aromantic Romance Audiobooks
+- Queer Romance Audiobooks (Master Playlist)
+
+Indicate:
+- PRIMARY playlist
+- SECONDARY playlist(s), up to 2
+
+Output as clean Markdown.
+"""
+
+def get_full_manuscript():
+    """
+    Combines all chapter files into one manuscript string.
+    """
+    chapter_files = sorted(CHAPTERS_DIR.glob("chapter_*.md"))
+
+    manuscript_parts = []
+
+    for chapter_file in chapter_files:
+        manuscript_parts.append(chapter_file.read_text(encoding="utf-8"))
+
+    return "\n\n".join(manuscript_parts)
+
+def extract_chapter_count_from_outline(outline_text):
+    """
+    Counts chapter headings from the Step 5 outline.
+    Looks for formats like:
+    Chapter 1
+    # Chapter 1
+    ## Chapter 1 - Title
+    """
+    matches = re.findall(
+        r"(?im)^\s*#{0,6}\s*Chapter\s+\d+\b",
+        outline_text
+    )
+
+    return len(matches)
 
 # Streamlit UI
 st.set_page_config(page_title="AI Novel Writing App", layout="wide")
@@ -415,7 +927,8 @@ page = st.sidebar.radio(
         "Step 3 - Metadata",
         "Step 4 - Character Profiles",
         "Step 5 - Outline",
-        "Step 6 - Write Chapter"
+        "Step 6 - Write Chapter",
+        "Auto Mode - Step 1 to Step 10"
     ]
 )
 
@@ -645,7 +1158,313 @@ if page == "Step 6 - Write Chapter":
                 result = ask_openai(prompt, model=model)
 
             file_name = f"chapter_{int(chapter_number):02}.md"
-            save_markdown(CHAPTERS_DIR / file_name, result)
+            with st.spinner(f"Auditing and fixing Chapter {chapter_number}..."):
+                audit_fix_result = ask_openai(
+                    generate_chapter_audit_and_fix_prompt(
+                        chapter_number,
+                        result,
+                        metadata_text,
+                        character_text,
+                        ending_text,
+                        outline_text
+                    ),
+                    model=model
+                )
 
-            st.success(f"Saved to chapters/{file_name}")
-            st.markdown(result)
+            fixed_chapter, change_log = split_fixed_chapter_and_log(audit_fix_result)
+
+            save_markdown(CHAPTERS_DIR / file_name, fixed_chapter)
+
+            log_file_name = f"chapter_{int(chapter_number):02}_log.md"
+            save_markdown(CHAPTERS_DIR / log_file_name, change_log)
+
+            st.success(f"Fixed chapter saved to chapters/{file_name}")
+            st.success(f"Change log saved to chapters/{log_file_name}")
+
+            st.subheader("Fixed Chapter")
+            st.markdown(fixed_chapter)
+
+            st.subheader("Change Log")
+            st.markdown(change_log)
+
+if page == "Step 6 - Write Chapter":
+    st.divider()
+    st.subheader("Compile Manuscript")
+
+    if st.button("Compile All Chapters to DOCX"):
+        metadata_text = read_markdown(OUTPUTS_DIR / "03_metadata.md")
+
+        if not metadata_text.strip():
+            st.error("Metadata missing. Generate Step 3 first.")
+        else:
+            docx_path = compile_chapters_to_docx(metadata_text)
+            st.success(f"Compiled manuscript saved to {docx_path}")
+
+if page == "Auto Mode - Step 1 to Step 10":
+    st.header("Auto Mode - Step 1 to Step 10")
+
+    st.warning(
+        "Auto Mode will call the API multiple times. This is convenient, but it can use more credits."
+    )
+
+    auto_enabled = st.toggle("Enable Auto Mode")
+
+    genre = st.text_input(
+        "Genre",
+        value="sapphic dark romance / psychological thriller",
+        key="auto_genre"
+    )
+
+    story_idea = st.text_area(
+        "Paste your story idea here",
+        height=300,
+        key="auto_story_idea"
+    )
+
+    existing_outline_text = read_markdown(OUTPUTS_DIR / "05_outline.md")
+    existing_outline_chapter_count = extract_chapter_count_from_outline(existing_outline_text)
+
+    suggested_chapter_count = max(20, existing_outline_chapter_count)
+
+    st.info(
+        f"Auto Mode will use the chapter count from Step 5 outline. "
+        f"Current detected count: {existing_outline_chapter_count if existing_outline_chapter_count else 'No outline found yet'}. "
+        f"Minimum chapter count: 20."
+    )
+
+    fallback_chapter_count = st.number_input(
+        "Fallback chapter count if Auto Mode cannot detect chapters from the outline",
+        min_value=20,
+        max_value=100,
+        value=suggested_chapter_count,
+        step=1
+    )
+
+    run_auto = st.button("Run Auto Mode from Step 1 to Step 10")
+
+    if run_auto:
+        if not auto_enabled:
+            st.error("Turn on the Auto Mode toggle first.")
+        elif not story_idea.strip():
+            st.error("Please paste your story idea first.")
+        else:
+            progress = st.progress(0)
+            status = st.empty()
+
+            # STEP 1 - Pitch Maker
+            status.write("Step 1: Generating pitch options...")
+            pitch_options_raw = ask_openai(
+                generate_pitch_prompt(story_idea, genre),
+                model=model
+            )
+
+            pitch_options = split_options(pitch_options_raw, label="OPTION")
+
+            recommended_pitch_number = extract_recommended_number(
+                pitch_options_raw,
+                recommendation_label="OPTION",
+                item_label="OPTION"
+            )
+
+            selected_pitch = pick_recommended_option(
+                pitch_options,
+                recommended_pitch_number,
+                label="OPTION"
+            )
+
+            save_markdown(OUTPUTS_DIR / "01_pitch_options_raw.md", pitch_options_raw)
+            save_markdown(OUTPUTS_DIR / "01_selected_pitch.md", selected_pitch)
+
+            progress.progress(10)
+
+            # STEP 2 - Ending Plotting
+            status.write("Step 2: Generating ending options...")
+            ending_options_raw = ask_openai(
+                generate_endings_prompt(selected_pitch),
+                model=model
+            )
+
+            ending_options = split_options(ending_options_raw, label="ENDING")
+
+            recommended_ending_number = extract_recommended_number(
+                ending_options_raw,
+                recommendation_label="ENDING",
+                item_label="ENDING"
+            )
+
+            selected_ending = pick_recommended_option(
+                ending_options,
+                recommended_ending_number,
+                label="ENDING"
+            )
+
+            status.write("Step 2: Expanding selected ending...")
+            expanded_ending = ask_openai(
+                generate_expand_ending_prompt(selected_pitch, selected_ending),
+                model=model
+            )
+
+            save_markdown(OUTPUTS_DIR / "02_ending_options_raw.md", ending_options_raw)
+            save_markdown(OUTPUTS_DIR / "02_selected_ending.md", expanded_ending)
+
+            progress.progress(20)
+
+            # STEP 3 - Metadata
+            status.write("Step 3: Generating metadata...")
+            metadata = ask_openai(
+                generate_metadata_prompt(selected_pitch, expanded_ending),
+                model=model
+            )
+            save_markdown(OUTPUTS_DIR / "03_metadata.md", metadata)
+
+            progress.progress(30)
+
+            # STEP 4 - Character Profiles
+            status.write("Step 4: Generating character profiles...")
+            characters = ask_openai(
+                generate_character_prompt(metadata, expanded_ending),
+                model=model
+            )
+            save_markdown(OUTPUTS_DIR / "04_characters.md", characters)
+
+            progress.progress(40)
+
+            # STEP 5 - Outline
+            status.write("Step 5: Generating outline...")
+            outline = ask_openai(
+                generate_outline_prompt(metadata, characters, expanded_ending),
+                model=model
+            )
+            save_markdown(OUTPUTS_DIR / "05_outline.md", outline)
+
+            detected_chapter_count = extract_chapter_count_from_outline(outline)
+            chapter_count = max(20, detected_chapter_count or int(fallback_chapter_count))
+
+            status.write(f"Step 5 complete. Detected {detected_chapter_count} chapters from outline. Auto Mode will write {chapter_count} chapters.")
+
+            progress.progress(50)
+
+            # STEP 6 - Write Chapters
+            status.write("Step 6: Writing chapters...")
+
+            for chapter_number in range(1, int(chapter_count) + 1):
+                status.write(f"Step 6: Writing Chapter {chapter_number} of {chapter_count}...")
+
+                chapter = ask_openai(
+                    generate_chapter_prompt(
+                        chapter_number,
+                        metadata,
+                        characters,
+                        expanded_ending,
+                        outline
+                    ),
+                    model=model
+                )
+
+                status.write(f"Step 6: Auditing and fixing Chapter {chapter_number}...")
+
+                audit_fix_result = ask_openai(
+                    generate_chapter_audit_and_fix_prompt(
+                        chapter_number,
+                        chapter,
+                        metadata,
+                        characters,
+                        expanded_ending,
+                        outline
+                    ),
+                    model=model
+                )
+
+                fixed_chapter, change_log = split_fixed_chapter_and_log(audit_fix_result)
+
+                file_name = f"chapter_{chapter_number:02}.md"
+                save_markdown(CHAPTERS_DIR / file_name, fixed_chapter)
+
+                log_file_name = f"chapter_{chapter_number:02}_log.md"
+                save_markdown(CHAPTERS_DIR / log_file_name, change_log)
+
+
+                chapter_progress = 50 + int((chapter_number / int(chapter_count)) * 20)
+                progress.progress(min(chapter_progress, 70))
+
+            manuscript = get_full_manuscript()
+
+            # STEP 7 - Final Audit
+            status.write("Step 7: Running final audit...")
+            final_audit = ask_openai(
+                generate_final_audit_prompt(
+                    metadata,
+                    characters,
+                    expanded_ending,
+                    outline,
+                    manuscript
+                ),
+                model=model
+            )
+            save_markdown(OUTPUTS_DIR / "07_final_audit.md", final_audit)
+
+            progress.progress(80)
+
+            status.write("Compiling final manuscript DOCX...")
+            docx_path = compile_chapters_to_docx(metadata)
+            save_markdown(PUBLISHING_DIR / "final_manuscript_path.txt", str(docx_path))
+
+            # STEP 8 - Book Cover Prompt
+            status.write("Step 8: Generating book cover prompt...")
+            cover_prompt = ask_openai(
+                generate_cover_prompt(metadata, characters),
+                model=model
+            )
+            save_markdown(PUBLISHING_DIR / "08_book_cover_prompt.md", cover_prompt)
+
+            progress.progress(86)
+
+            # STEP 9 - Draft2Digital Details
+            status.write("Step 9: Generating Draft2Digital metadata...")
+            d2d_metadata = ask_openai(
+                generate_draft2digital_prompt(manuscript, metadata),
+                model=model
+            )
+            save_markdown(PUBLISHING_DIR / "09_draft2digital_metadata.md", d2d_metadata)
+
+            progress.progress(93)
+
+            # STEP 10 - YouTube Details
+            status.write("Step 10: Generating YouTube metadata...")
+            youtube_metadata = ask_openai(
+                generate_youtube_prompt(manuscript, metadata),
+                model=model
+            )
+            save_markdown(PUBLISHING_DIR / "10_youtube_metadata.md", youtube_metadata)
+
+            progress.progress(100)
+
+            status.write("Auto Mode complete.")
+
+            st.success("Done. Auto Mode finished Step 1 to Step 10.")
+
+            st.subheader("Saved Files")
+            st.markdown("""
+                - `outputs/01_pitch_options_raw.md`
+                - `outputs/01_selected_pitch.md`
+                - `outputs/02_ending_options_raw.md`
+                - `outputs/02_selected_ending.md`
+                - `outputs/03_metadata.md`
+                - `outputs/04_characters.md`
+                - `outputs/05_outline.md`
+                - `outputs/07_final_audit.md`
+                - `chapters/chapter_01.md` and onward
+                - `publishing/08_book_cover_prompt.md`
+                - `publishing/09_draft2digital_metadata.md`
+                - `publishing/10_youtube_metadata.md`
+                - `publishing/final_manuscript.docx`
+                """)
+
+            st.subheader("Selected Pitch")
+            st.markdown(selected_pitch)
+
+            st.subheader("Confirmed Ending")
+            st.markdown(expanded_ending)
+
+            st.subheader("Final Audit")
+            st.markdown(final_audit)
