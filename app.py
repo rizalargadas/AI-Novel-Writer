@@ -206,15 +206,16 @@ import time
 
 UTILITY_MODEL = "gpt-5.4-mini"
 
-def ask_openai(prompt, model="gpt-5.5", reasoning_effort="low", retries=3, delay=5):
+def ask_openai(prompt, model="gpt-5.5", reasoning_effort="low", retries=3, delay=5, max_tokens=16000):
     """
     Sends prompt to OpenAI with retry logic.
     reasoning_effort: "low" | "medium" | None (None = no reasoning block)
+    max_tokens: set higher for chapter rewrites to avoid truncation
     """
     last_error = None
     for attempt in range(1, retries + 1):
         try:
-            kwargs = {"model": model, "input": prompt}
+            kwargs = {"model": model, "input": prompt, "max_output_tokens": max_tokens}
             if reasoning_effort:
                 kwargs["reasoning"] = {"effort": reasoning_effort}
             response = client.responses.create(**kwargs)
@@ -1061,7 +1062,9 @@ Your output must have exactly two sections:
 
 # FIXED CHAPTER
 
-[Write the complete, fully revised chapter here. Do not truncate.]
+[Write the COMPLETE, fully revised chapter here from first word to last.
+Never truncate. Never summarize the ending. Every scene must be fully written.
+If the chapter is long, write all of it. Do not skip any section.]
 
 # FINAL AUDIT CHANGE LOG
 
@@ -1153,10 +1156,22 @@ def get_surrounding_chapters(chapters_dir, chapter_number, window=1):
 def extract_readiness_score(audit_text):
     """
     Extracts the numeric readiness score from an audit report.
-    Returns int or None.
+    Handles both inline format ("Readiness Score: 83 / 100")
+    and header+next-line format ("## Overall Readiness Score\n83 / 100").
     """
+    # Format 1: inline — "Readiness Score: 83 / 100" or "Score: 83/100"
     m = re.search(r"readiness score[:\s]+(\d+)\s*/\s*100", audit_text, re.I)
-    return int(m.group(1)) if m else None
+    if m:
+        return int(m.group(1))
+    # Format 2: header then score on next non-empty line — "## Overall Readiness Score\n83 / 100"
+    m2 = re.search(r"(?im)#+\s*overall readiness score\s*\n+\s*(\d+)\s*/\s*100", audit_text)
+    if m2:
+        return int(m2.group(1))
+    # Format 3: bare score anywhere near "/ 100"
+    m3 = re.search(r"(\d{2})\s*/\s*100", audit_text)
+    if m3:
+        return int(m3.group(1))
+    return None
 
 
 def parse_chapter_fixes(audit_text):
@@ -1237,6 +1252,9 @@ def final_audit_and_fix_all_chapters(metadata_text, continuity_ref, ending_text,
 
     final_logs = []
 
+    # Full model is required for chapter rewrites — mini model cannot do deep prose revision
+    FIX_MODEL = model
+
     # ── PASS 1: Fix flagged chapters with specific briefs ───────────────────
     for index, chapter_file in enumerate(chapter_files, start=1):
         chapter_match = re.search(r"chapter_(\d+)\.md", chapter_file.name, re.I)
@@ -1254,7 +1272,7 @@ def final_audit_and_fix_all_chapters(metadata_text, continuity_ref, ending_text,
 
         chapter_text  = chapter_file.read_text(encoding="utf-8")
         outline_slice = get_outline_slice(outline_text, chapter_number)
-        surrounding   = get_surrounding_chapters(chapters_dir, chapter_number)
+        surrounding   = get_surrounding_chapters(chapters_dir, chapter_number, window=2)
         fix_brief     = chapter_fix_briefs.get(chapter_number, "")
 
         audit_fix_result = ask_openai(
@@ -1268,7 +1286,9 @@ def final_audit_and_fix_all_chapters(metadata_text, continuity_ref, ending_text,
                 surrounding_chapters=surrounding,
                 chapter_fix_brief=fix_brief
             ),
-            model=model
+            model=FIX_MODEL,
+            reasoning_effort="medium",
+            max_tokens=32000
         )
 
         fixed_chapter, change_log = split_fixed_chapter_and_final_log(audit_fix_result)
@@ -1324,7 +1344,7 @@ def final_audit_and_fix_all_chapters(metadata_text, continuity_ref, ending_text,
 
             chapter_text  = chapter_file.read_text(encoding="utf-8")
             outline_slice = get_outline_slice(outline_text, chapter_number)
-            surrounding   = get_surrounding_chapters(chapters_dir, chapter_number)
+            surrounding   = get_surrounding_chapters(chapters_dir, chapter_number, window=2)
             fix_brief     = pass2_fixes.get(chapter_number, "")
 
             result2 = ask_openai(
@@ -1338,7 +1358,9 @@ def final_audit_and_fix_all_chapters(metadata_text, continuity_ref, ending_text,
                     surrounding_chapters=surrounding,
                     chapter_fix_brief=fix_brief
                 ),
-                model=model
+                model=FIX_MODEL,
+                reasoning_effort="medium",
+                max_tokens=32000
             )
 
             fixed2, log2 = split_fixed_chapter_and_final_log(result2)
@@ -2248,7 +2270,7 @@ if page == "Auto Mode - Step 1 to Step 10":
                 continuity_ref=continuity_ref,
                 ending_text=expanded_ending,
                 outline_text=outline,
-                model=UTILITY_MODEL,
+                model=model,
                 chapters_dir=CHAPTERS_DIR,
                 outputs_dir=OUTPUTS_DIR,
                 final_audit_text=final_audit,
