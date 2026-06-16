@@ -188,26 +188,42 @@ def read_markdown(file_path):
     return ""
 
 
-def ask_openai(prompt, model="gpt-5.5"):
+import time
+
+UTILITY_MODEL = "gpt-5.4-mini"
+
+def ask_openai(prompt, model="gpt-5.5", reasoning_effort="low", retries=3, delay=5):
     """
-    Sends prompt to OpenAI.
-    Use this only when the user clicks a button.
+    Sends prompt to OpenAI with retry logic.
+    reasoning_effort: "low" | "medium" | None (None = no reasoning block)
     """
-    response = client.responses.create(
-        model=model,
-        reasoning={"effort": "low"},
-        input=prompt
-    )
-    return response.output_text
+    last_error = None
+    for attempt in range(1, retries + 1):
+        try:
+            kwargs = {"model": model, "input": prompt}
+            if reasoning_effort:
+                kwargs["reasoning"] = {"effort": reasoning_effort}
+            response = client.responses.create(**kwargs)
+            return response.output_text
+        except Exception as e:
+            last_error = e
+            if attempt < retries:
+                time.sleep(delay * attempt)
+    raise RuntimeError(f"OpenAI call failed after {retries} attempts: {last_error}")
 
 
-def generate_pitch_prompt(story_idea):
+def generate_pitch_prompt(story_idea, publishing_context=""):
+    context_block = f"""
+PUBLISHING CONTEXT:
+{publishing_context.strip()}
+""" if publishing_context.strip() else ""
+
     return f"""
 You are a bestselling LGBTQ+ fiction writer.
 
 Using the details below, generate 5 distinct story plot concepts.
 Let the genre, tone, and subgenre emerge naturally from the story idea — do not force a fixed genre.
-
+{context_block}
 Format each option exactly like this:
 
 OPTION 1
@@ -236,10 +252,16 @@ USER INPUT:
 
 
 def generate_endings_prompt(pitch_text):
+    """
+    Generates 5 fully-expanded endings in one call.
+    Eliminates the separate expand step.
+    """
     return f"""
-Based on the selected story plot below, create 10 different ending ideas.
+Based on the selected story plot below, create 5 distinct fully-expanded ending concepts.
 
-Format each ending exactly like this:
+Each ending must be immediately usable as the confirmed ending reference document.
+
+Format each ending EXACTLY like this:
 
 ENDING 1
 Title:
@@ -247,50 +269,20 @@ Ending Summary:
 Emotional Payoff:
 Reader Satisfaction:
 Risk:
+Character Resolution:
+Final Twist or Reveal:
+Last Scene Description:
+Why This Ending Works:
+Notes for Foreshadowing Earlier Chapters:
 
-ENDING 2
-Title:
-Ending Summary:
-Emotional Payoff:
-Reader Satisfaction:
-Risk:
+Repeat for ENDING 2 through ENDING 5.
 
-Continue until ENDING 10.
-
-After all 10 options, add:
+After all 5 endings, add:
 RECOMMENDED ENDING:
-Recommend the best ending according to:
-- uniqueness
-- emotional impact
-- commercial reader satisfaction
+Recommend the best ending based on uniqueness, emotional impact, and commercial reader satisfaction.
 
 SELECTED PLOT:
 {pitch_text}
-"""
-
-def generate_expand_ending_prompt(pitch_text, selected_ending):
-    return f"""
-Based on the selected plot and selected ending below, expand the ending into a clean Markdown reference document.
-
-This expanded ending will become the official confirmed ending for the novel.
-
-Include:
-- Ending Title
-- Final Ending Summary
-- Emotional Payoff
-- Character Resolution
-- Final Twist or Reveal, if applicable
-- Last Scene Description
-- Why This Ending Works
-- Notes for Foreshadowing Earlier Chapters
-
-Make the ending emotionally moving, unique, commercially satisfying, and structurally useful for later outlining.
-
-SELECTED PLOT:
-{pitch_text}
-
-SELECTED ENDING:
-{selected_ending}
 """
 
 def generate_metadata_prompt(pitch_text, ending_text):
@@ -676,7 +668,7 @@ def export_final_publishing_outputs(parent_folder, metadata_text, selected_pitch
         "youtube": youtube_path,
     }
 
-def generate_chapter_audit_and_fix_prompt(chapter_number, chapter_text, metadata_text, character_text, ending_text, outline_text):
+def generate_chapter_audit_and_fix_prompt(chapter_number, chapter_text, metadata_text, continuity_ref, ending_text, outline_slice):
     return f"""
 You are a professional fiction continuity editor and prose revision specialist.
 
@@ -721,14 +713,14 @@ PROJECT FILES:
 METADATA:
 {metadata_text}
 
-CHARACTER PROFILES:
-{character_text}
+CONTINUITY REFERENCE:
+{continuity_ref}
 
 CONFIRMED ENDING:
 {ending_text}
 
-OUTLINE:
-{outline_text}
+RELEVANT OUTLINE:
+{outline_slice}
 
 CHAPTER TEXT:
 {chapter_text}
@@ -788,7 +780,12 @@ CONFIRMED ENDING:
 """
 
 
-def generate_chapter_prompt(chapter_number, metadata_text, character_text, ending_text, outline_text):
+def generate_chapter_prompt(chapter_number, metadata_text, continuity_ref, ending_text, outline_slice, prev_chapter_tail=""):
+    prev_block = f"""
+SCENE HANDOFF (final passage of Chapter {chapter_number - 1} — maintain flow):
+{prev_chapter_tail}
+""" if prev_chapter_tail.strip() else ""
+
     return f"""
 Write Chapter {chapter_number} of the novel.
 
@@ -796,15 +793,15 @@ PROJECT CONTEXT:
 Metadata:
 {metadata_text}
 
-Character Profiles:
-{character_text}
+Continuity Reference:
+{continuity_ref}
 
 Confirmed Ending:
 {ending_text}
 
-Outline:
-{outline_text}
-
+Relevant Outline (chapters near {chapter_number}):
+{outline_slice}
+{prev_block}
 {WRITING_PHILOSOPHY}
 
 PRE-WRITING REVIEW:
@@ -812,6 +809,7 @@ Before writing, silently answer:
 - What is the emotional core of this chapter?
 - What does the reader need to feel by the end?
 - What changes emotionally between the beginning and end of this chapter?
+- How does this chapter connect to where the previous chapter left off?
 
 WRITING RULES:
 - Write only the chapter.
@@ -894,7 +892,77 @@ def pick_recommended_option(options, recommended_number, label):
     return options[0] if options else ""
 
 
-def generate_final_audit_prompt(metadata_text, character_text, ending_text, outline_text, manuscript_text):
+def generate_continuity_reference_prompt(metadata_text, character_text):
+    """
+    Creates a compact continuity reference from full metadata + character profiles.
+    Used in chapter prompts instead of the full character document.
+    """
+    return f"""
+You are a fiction editor creating a quick-reference continuity sheet.
+
+From the materials below, extract and condense into a single compact Markdown document:
+
+## Key Facts
+- Novel title
+- Setting (time period, locations)
+- Genre and tone
+
+## Characters (one line each)
+For every named character: Name | Age | Role | 2-3 defining traits | Key relationships
+
+## Timeline Anchors
+List any specific dates, seasons, or time markers established in the story.
+
+## Must-Remember Details
+Up to 10 bullet points of facts that must stay consistent across all chapters
+(names of places, objects, relationship statuses, secrets known/unknown, etc.)
+
+Be concise. This document must fit in ~400 words.
+
+METADATA:
+{metadata_text}
+
+CHARACTER PROFILES:
+{character_text}
+"""
+
+
+def get_outline_slice(outline_text, chapter_number, window=2):
+    """
+    Returns only the outline entries for chapters near chapter_number
+    (window chapters before and after), to reduce token usage per chapter prompt.
+    Falls back to full outline if parsing fails.
+    """
+    pattern = r"(?im)(^\s*#{0,6}\s*Chapter\s+\d+\b.*?)(?=^\s*#{0,6}\s*Chapter\s+\d+\b|\Z)"
+    chapters = re.findall(pattern, outline_text, re.DOTALL)
+
+    if not chapters:
+        return outline_text
+
+    start = max(0, chapter_number - 1 - window)
+    end   = min(len(chapters), chapter_number + window)
+    slice_text = "".join(chapters[start:end])
+
+    return slice_text if slice_text.strip() else outline_text
+
+
+def get_chapter_tail(chapters_dir, chapter_number, words=500):
+    """
+    Returns the last ~N words of the previous chapter for scene-handoff context.
+    Returns empty string if chapter_number is 1 or file not found.
+    """
+    if chapter_number <= 1:
+        return ""
+    prev_file = chapters_dir / f"chapter_{chapter_number - 1:02}.md"
+    if not prev_file.exists():
+        return ""
+    text = prev_file.read_text(encoding="utf-8")
+    word_list = text.split()
+    tail = " ".join(word_list[-words:]) if len(word_list) > words else text
+    return tail
+
+
+def generate_final_audit_prompt(metadata_text, continuity_ref, ending_text, outline_text, manuscript_text):
     return f"""
 You are a professional developmental editor and publishing-readiness auditor.
 
@@ -914,8 +982,8 @@ Check for:
 Do not rewrite the full manuscript.
 Create a clear Markdown audit report with:
 - Overall readiness score out of 100
-- Critical issues
-- Moderate issues
+- Critical issues (list affected chapter numbers)
+- Moderate issues (list affected chapter numbers)
 - Minor issues
 - Specific chapter-level fixes needed
 - Final publishing recommendation
@@ -923,8 +991,8 @@ Create a clear Markdown audit report with:
 METADATA:
 {metadata_text}
 
-CHARACTER PROFILES:
-{character_text}
+CONTINUITY REFERENCE:
+{continuity_ref}
 
 CONFIRMED ENDING:
 {ending_text}
@@ -936,15 +1004,12 @@ MANUSCRIPT:
 {manuscript_text}
 """
 
-def generate_final_audit_and_fix_prompt(chapter_number, chapter_text, metadata_text, character_text, ending_text, outline_text, full_manuscript_text):
+def generate_final_audit_and_fix_prompt(chapter_number, chapter_text, metadata_text, continuity_ref, ending_text, outline_slice, surrounding_chapters):
     return f"""
 You are a professional developmental editor and final manuscript continuity fixer.
 
-This is the final audit pass for the full novel.
-
 Your task:
-Audit Chapter {chapter_number} against the FULL MANUSCRIPT and project files.
-If this chapter has any issue that affects publishing readiness, fix the chapter directly.
+Fix Chapter {chapter_number} based on the final audit issues flagged for this chapter.
 
 Your output must have exactly two sections:
 
@@ -954,104 +1019,151 @@ Your output must have exactly two sections:
 
 # FINAL AUDIT CHANGE LOG
 
-List every final-audit fix made to this chapter.
+List every fix made.
 
-For each fix, include:
+For each fix:
 - Original problem
 - Fix applied
-- Why the fix was necessary
+- Why it was necessary
 
-If no final-audit issues are found, keep the chapter unchanged and say:
+If no fixes needed, keep the chapter unchanged and say:
 No final-audit issues found. Chapter retained as-is.
 
-Check especially for:
+Focus on:
 - Cross-chapter continuity errors
 - Timeline problems
 - Repeated or missing reveals
 - Character motivation inconsistencies
-- Relationship arc inconsistencies
 - Chapter ending/beginning flow problems
 - Setup/payoff issues
 - Contradictions with the confirmed ending
-- Incorrect names, ages, locations, relationship details
-- Any remaining chapter title problems
-- Any obvious publishing-readiness issue
 
 PROJECT FILES:
 
 METADATA:
 {metadata_text}
 
-CHARACTER PROFILES:
-{character_text}
+CONTINUITY REFERENCE:
+{continuity_ref}
 
 CONFIRMED ENDING:
 {ending_text}
 
-OUTLINE:
-{outline_text}
+RELEVANT OUTLINE:
+{outline_slice}
 
-FULL MANUSCRIPT:
-{full_manuscript_text}
+SURROUNDING CHAPTERS (for flow context):
+{surrounding_chapters}
 
 CHAPTER TO FIX:
 {chapter_text}
 """
 
-def final_audit_and_fix_all_chapters(metadata_text, character_text, ending_text, outline_text, model, chapters_dir, outputs_dir, status=None):
+def extract_flagged_chapters(final_audit_text):
     """
-    Runs a final audit/fix pass across all chapter files.
-    Updates chapter files directly.
-    Saves final audit fix logs.
+    Parses the final audit report and returns a set of chapter numbers
+    that have Critical or Moderate issues — the only ones worth fixing.
+    Falls back to all chapters if parsing fails.
+    """
+    flagged = set()
+    for match in re.finditer(r"chapter\s+(\d+)", final_audit_text, re.I):
+        flagged.add(int(match.group(1)))
+
+    critical_section = re.search(
+        r"(?is)#+\s*critical issues.*?(?=#+\s*(moderate|minor|specific|final)|$)",
+        final_audit_text
+    )
+    moderate_section = re.search(
+        r"(?is)#+\s*moderate issues.*?(?=#+\s*(minor|specific|final)|$)",
+        final_audit_text
+    )
+
+    critical_chapters = set()
+    moderate_chapters = set()
+
+    if critical_section:
+        for m in re.finditer(r"chapter\s+(\d+)", critical_section.group(0), re.I):
+            critical_chapters.add(int(m.group(1)))
+    if moderate_section:
+        for m in re.finditer(r"chapter\s+(\d+)", moderate_section.group(0), re.I):
+            moderate_chapters.add(int(m.group(1)))
+
+    targeted = critical_chapters | moderate_chapters
+    return targeted if targeted else flagged
+
+
+def get_surrounding_chapters(chapters_dir, chapter_number, window=1):
+    """Returns the text of up to window chapters before and after chapter_number."""
+    parts = []
+    for offset in range(-window, window + 1):
+        if offset == 0:
+            continue
+        n = chapter_number + offset
+        f = chapters_dir / f"chapter_{n:02}.md"
+        if f.exists():
+            parts.append(f"--- Chapter {n} ---\n" + f.read_text(encoding="utf-8")[:3000])
+    return "\n\n".join(parts) if parts else "No surrounding chapters available."
+
+
+def final_audit_and_fix_all_chapters(metadata_text, continuity_ref, ending_text, outline_text, model, chapters_dir, outputs_dir, final_audit_text="", status=None):
+    """
+    Runs a targeted final fix pass — only on chapters flagged as Critical or Moderate
+    in the final audit report. Skips chapters with no significant issues.
+    Uses surrounding chapters instead of full manuscript for context.
     """
 
     chapter_files = sorted(chapters_dir.glob("chapter_*.md"))
-
     chapter_files = [
-        file for file in chapter_files
-        if not file.name.endswith("_log.md") and not file.name.endswith("_final_log.md")
+        f for f in chapter_files
+        if not f.name.endswith("_log.md") and not f.name.endswith("_final_log.md")
     ]
 
-    full_manuscript_text = get_full_manuscript(chapters_dir)
+    flagged_chapters = extract_flagged_chapters(final_audit_text) if final_audit_text.strip() else set()
+
+    # If we couldn't parse any flagged chapters, fix all (safe fallback)
+    fix_all = not bool(flagged_chapters)
+    if fix_all and status:
+        status.write("Step 7: Could not detect flagged chapters — fixing all chapters as fallback...")
+
     final_logs = []
 
     for index, chapter_file in enumerate(chapter_files, start=1):
         chapter_match = re.search(r"chapter_(\d+)\.md", chapter_file.name, re.I)
         chapter_number = int(chapter_match.group(1)) if chapter_match else index
 
+        if not fix_all and chapter_number not in flagged_chapters:
+            final_logs.append(f"# Chapter {chapter_number} Final Audit Log\n\nNo critical or moderate issues flagged. Chapter skipped.")
+            continue
+
         if status:
-            status.write(f"Step 7: Final auditing and fixing Chapter {chapter_number}...")
+            status.write(f"Step 7: Fixing Chapter {chapter_number}...")
 
         chapter_text = chapter_file.read_text(encoding="utf-8")
+        outline_slice = get_outline_slice(outline_text, chapter_number)
+        surrounding = get_surrounding_chapters(chapters_dir, chapter_number)
 
         audit_fix_result = ask_openai(
             generate_final_audit_and_fix_prompt(
                 chapter_number=chapter_number,
                 chapter_text=chapter_text,
                 metadata_text=metadata_text,
-                character_text=character_text,
+                continuity_ref=continuity_ref,
                 ending_text=ending_text,
-                outline_text=outline_text,
-                full_manuscript_text=full_manuscript_text
+                outline_slice=outline_slice,
+                surrounding_chapters=surrounding
             ),
             model=model
         )
 
         fixed_chapter, final_change_log = split_fixed_chapter_and_final_log(audit_fix_result)
-
         chapter_file.write_text(fixed_chapter, encoding="utf-8")
 
         final_log_file = chapters_dir / f"chapter_{chapter_number:02}_final_log.md"
         final_log_file.write_text(final_change_log, encoding="utf-8")
-
         final_logs.append(f"# Chapter {chapter_number} Final Audit Log\n\n{final_change_log}")
-
-        # Refresh manuscript after each chapter fix so later chapters compare against updated text
-        full_manuscript_text = get_full_manuscript(chapters_dir)
 
     combined_final_log = "\n\n".join(final_logs)
     save_markdown(outputs_dir / "07_final_audit_fixes.md", combined_final_log)
-
     return combined_final_log
 
 
@@ -1095,9 +1207,9 @@ CHARACTER PROFILES:
 """
 
 
-def generate_draft2digital_prompt(manuscript_text, metadata_text):
+def generate_draft2digital_prompt(chapter_one_text, metadata_text):
     return f"""
-Using the manuscript and metadata below, create complete SEO-optimized Draft2Digital publishing metadata.
+Using the novel metadata and opening chapter below, create complete SEO-optimized Draft2Digital publishing metadata.
 
 Provide:
 
@@ -1138,12 +1250,12 @@ Use clear Markdown headers.
 METADATA:
 {metadata_text}
 
-MANUSCRIPT:
-{manuscript_text}
+OPENING CHAPTER (for tone and voice reference):
+{chapter_one_text}
 """
 
 
-def generate_youtube_prompt(manuscript_text, metadata_text):
+def generate_youtube_prompt(chapter_one_text, metadata_text):
     return f"""
 Act as a YouTube SEO specialist with expertise in audiobook marketing and LGBTQ+ romance content discovery.
 
@@ -1153,8 +1265,8 @@ Input:
 METADATA:
 {metadata_text}
 
-MANUSCRIPT:
-{manuscript_text}
+OPENING CHAPTER (for tone and voice reference):
+{chapter_one_text}
 
 Create:
 
@@ -1434,26 +1546,11 @@ if page == "Step 2 - Ending Plotting":
 
                 st.text_area("Selected Ending Preview", selected_ending, height=300)
 
-                selected_ending_hash = hashlib.md5(selected_ending.encode("utf-8")).hexdigest()
-
-                if st.session_state.get("expanded_ending_hash") != selected_ending_hash:
-                    with st.spinner("Expanding and auto-saving selected ending..."):
-                        expand_prompt = generate_expand_ending_prompt(pitch_text, selected_ending)
-                        expanded_ending = ask_openai(expand_prompt, model=model)
-
-                    save_markdown(OUTPUTS_DIR / "02_selected_ending.md", expanded_ending)
-
-                    st.session_state["expanded_ending_hash"] = selected_ending_hash
-                    st.session_state["expanded_ending_text"] = expanded_ending
-
-                expanded_ending_text = st.session_state.get(
-                    "expanded_ending_text",
-                    read_markdown(OUTPUTS_DIR / "02_selected_ending.md")
-                )
-
-                st.success("Expanded ending auto-saved to outputs/02_selected_ending.md")
-                st.subheader("Expanded Confirmed Ending")
-                st.markdown(expanded_ending_text)
+                # Endings are now fully expanded in the generation step — save directly
+                save_markdown(OUTPUTS_DIR / "02_selected_ending.md", selected_ending)
+                st.success("Ending saved to outputs/02_selected_ending.md")
+                st.subheader("Confirmed Ending")
+                st.markdown(selected_ending)
             else:
                 st.warning("Could not split endings cleanly. Copy your chosen ending manually.")
 
@@ -1614,6 +1711,13 @@ if page == "Auto Mode - Step 1 to Step 10":
         placeholder="Describe your story idea here. Genre, tone, and theme will be inferred automatically."
     )
 
+    publishing_context = st.text_input(
+        "Publishing context (optional)",
+        key="auto_publishing_context",
+        placeholder="e.g. Kindle Unlimited sapphic romance, heat level 3/5, 18+ audience"
+    )
+    st.caption("Helps sharpen the pitch options. Leave blank to let the AI decide.")
+
     st.subheader("Chapter Count")
     chapter_mode = st.radio(
         "How should the number of chapters be decided?",
@@ -1645,8 +1749,9 @@ if page == "Auto Mode - Step 1 to Step 10":
 
         with st.spinner("Step 1: Generating pitch options..."):
             pitch_options_raw = ask_openai(
-                generate_pitch_prompt(story_idea),
-                model=model
+                generate_pitch_prompt(story_idea, publishing_context=publishing_context),
+                model=model,
+                reasoning_effort="medium"
             )
 
         pitch_options = split_options(pitch_options_raw, label="OPTION")
@@ -1783,11 +1888,12 @@ if page == "Auto Mode - Step 1 to Step 10":
 
             progress.progress(10)
 
-            # STEP 2 - Ending Plotting
+            # STEP 2 - Ending Plotting (merged: 5 fully-expanded endings in one call)
             status.write("Step 2: Generating ending options...")
             ending_options_raw = ask_openai(
                 generate_endings_prompt(selected_pitch),
-                model=model
+                model=model,
+                reasoning_effort="medium"
             )
 
             ending_options = split_options(ending_options_raw, label="ENDING")
@@ -1798,21 +1904,16 @@ if page == "Auto Mode - Step 1 to Step 10":
                 item_label="ENDING"
             )
 
-            selected_ending = pick_recommended_option(
+            # Selected ending is already fully expanded — no second call needed
+            expanded_ending = pick_recommended_option(
                 ending_options,
                 recommended_ending_number,
                 label="ENDING"
             )
 
-            if not selected_ending.strip():
+            if not expanded_ending.strip():
                 st.error("Auto Mode stopped: could not detect a selected ending from Step 2.")
                 st.stop()
-
-            status.write("Step 2: Expanding selected ending...")
-            expanded_ending = ask_openai(
-                generate_expand_ending_prompt(selected_pitch, selected_ending),
-                model=model
-            )
 
             save_markdown(OUTPUTS_DIR / "02_ending_options_raw.md", ending_options_raw)
             save_markdown(OUTPUTS_DIR / "02_selected_ending.md", expanded_ending)
@@ -1823,7 +1924,8 @@ if page == "Auto Mode - Step 1 to Step 10":
             status.write("Step 3: Generating metadata...")
             metadata = ask_openai(
                 generate_metadata_prompt(selected_pitch, expanded_ending),
-                model=model
+                model=model,
+                reasoning_effort="medium"
             )
 
             # Inject the user-approved title into metadata so all downstream steps use it
@@ -1844,9 +1946,19 @@ if page == "Auto Mode - Step 1 to Step 10":
             status.write("Step 4: Generating character profiles...")
             characters = ask_openai(
                 generate_character_prompt(metadata, expanded_ending),
-                model=model
+                model=model,
+                reasoning_effort="medium"
             )
             save_markdown(OUTPUTS_DIR / "04_characters.md", characters)
+
+            # Build condensed continuity reference (used in all chapter prompts)
+            status.write("Step 4: Building continuity reference...")
+            continuity_ref = ask_openai(
+                generate_continuity_reference_prompt(metadata, characters),
+                model=UTILITY_MODEL,
+                reasoning_effort=None
+            )
+            save_markdown(OUTPUTS_DIR / "04_continuity_ref.md", continuity_ref)
 
             progress.progress(40)
 
@@ -1854,7 +1966,8 @@ if page == "Auto Mode - Step 1 to Step 10":
             status.write("Step 5: Generating outline...")
             outline = ask_openai(
                 generate_outline_prompt(metadata, characters, expanded_ending, chapter_count=manual_chapter_count),
-                model=model
+                model=model,
+                reasoning_effort="medium"
             )
             save_markdown(OUTPUTS_DIR / "05_outline.md", outline)
 
@@ -1875,15 +1988,20 @@ if page == "Auto Mode - Step 1 to Step 10":
             for chapter_number in range(1, int(chapter_count) + 1):
                 status.write(f"Step 6: Writing Chapter {chapter_number} of {chapter_count}...")
 
+                outline_slice    = get_outline_slice(outline, chapter_number)
+                prev_chapter_tail = get_chapter_tail(CHAPTERS_DIR, chapter_number)
+
                 chapter = ask_openai(
                     generate_chapter_prompt(
                         chapter_number,
                         metadata,
-                        characters,
+                        continuity_ref,
                         expanded_ending,
-                        outline
+                        outline_slice,
+                        prev_chapter_tail
                     ),
-                    model=model
+                    model=model,
+                    reasoning_effort=None
                 )
 
                 status.write(f"Step 6: Auditing and fixing Chapter {chapter_number}...")
@@ -1893,11 +2011,12 @@ if page == "Auto Mode - Step 1 to Step 10":
                         chapter_number,
                         chapter,
                         metadata,
-                        characters,
+                        continuity_ref,
                         expanded_ending,
-                        outline
+                        outline_slice
                     ),
-                    model=model
+                    model=UTILITY_MODEL,
+                    reasoning_effort=None
                 )
 
                 fixed_chapter, change_log = split_fixed_chapter_and_log(audit_fix_result)
@@ -1913,34 +2032,34 @@ if page == "Auto Mode - Step 1 to Step 10":
 
             manuscript = get_full_manuscript(CHAPTERS_DIR)
 
-            # STEP 7 - Final Audit + Auto-Fix
+            # STEP 7 - Final Audit + Targeted Fix
             status.write("Step 7: Running final audit report...")
-
-            manuscript = get_full_manuscript(CHAPTERS_DIR)
 
             final_audit = ask_openai(
                 generate_final_audit_prompt(
                     metadata,
-                    characters,
+                    continuity_ref,
                     expanded_ending,
                     outline,
                     manuscript
                 ),
-                model=model
+                model=model,
+                reasoning_effort="medium"
             )
 
             save_markdown(OUTPUTS_DIR / "07_final_audit.md", final_audit)
 
-            status.write("Step 7: Auto-fixing final manuscript issues chapter by chapter...")
+            status.write("Step 7: Fixing flagged chapters only...")
 
             final_audit_fixes = final_audit_and_fix_all_chapters(
                 metadata_text=metadata,
-                character_text=characters,
+                continuity_ref=continuity_ref,
                 ending_text=expanded_ending,
                 outline_text=outline,
-                model=model,
+                model=UTILITY_MODEL,
                 chapters_dir=CHAPTERS_DIR,
                 outputs_dir=OUTPUTS_DIR,
+                final_audit_text=final_audit,
                 status=status
             )
 
@@ -1962,11 +2081,16 @@ if page == "Auto Mode - Step 1 to Step 10":
 
             save_markdown(PUBLISHING_DIR / "final_manuscript_path.txt", str(docx_path))
 
+            # Grab chapter 1 text for publishing steps (D2D + YouTube)
+            ch1_file = CHAPTERS_DIR / "chapter_01.md"
+            chapter_one_text = ch1_file.read_text(encoding="utf-8") if ch1_file.exists() else ""
+
             # STEP 8 - Book Cover Prompt
             status.write("Step 8: Generating book cover prompt...")
             cover_prompt = ask_openai(
                 generate_cover_prompt(metadata, characters),
-                model=model
+                model=UTILITY_MODEL,
+                reasoning_effort=None
             )
             save_markdown(PUBLISHING_DIR / "08_book_cover_prompt.md", cover_prompt)
 
@@ -1975,8 +2099,9 @@ if page == "Auto Mode - Step 1 to Step 10":
             # STEP 9 - Draft2Digital Details
             status.write("Step 9: Generating Draft2Digital metadata...")
             d2d_metadata = ask_openai(
-                generate_draft2digital_prompt(manuscript, metadata),
-                model=model
+                generate_draft2digital_prompt(chapter_one_text, metadata),
+                model=UTILITY_MODEL,
+                reasoning_effort=None
             )
             save_markdown(PUBLISHING_DIR / "09_draft2digital_metadata.md", d2d_metadata)
 
@@ -1985,8 +2110,9 @@ if page == "Auto Mode - Step 1 to Step 10":
             # STEP 10 - YouTube Details
             status.write("Step 10: Generating YouTube metadata...")
             youtube_metadata = ask_openai(
-                generate_youtube_prompt(manuscript, metadata),
-                model=model
+                generate_youtube_prompt(chapter_one_text, metadata),
+                model=UTILITY_MODEL,
+                reasoning_effort=None
             )
             save_markdown(PUBLISHING_DIR / "10_youtube_metadata.md", youtube_metadata)
 
