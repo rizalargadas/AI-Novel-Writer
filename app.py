@@ -966,27 +966,50 @@ def generate_final_audit_prompt(metadata_text, continuity_ref, ending_text, outl
     return f"""
 You are a professional developmental editor and publishing-readiness auditor.
 
-Perform a deep final audit of this novel.
+Perform a deep final audit of this novel. Your goal is to identify everything preventing this manuscript from scoring 90+/100.
 
-Check for:
-- Plot continuity
-- Character consistency
-- Timeline issues
-- Contradictions
-- Emotional arc problems
-- Weak scenes
-- Missing setup or payoff
-- Names that conflict with the character profiles
-- Publishing readiness
+A score of 90+ means:
+- No timeline or season continuity breaks
+- All setup/payoff chains are seeded and resolved on-page
+- Evidence and reveal logic is clear and inevitable (not assembled at the last moment)
+- Romance pacing has enough emotional beats for the genre
+- Secondary characters have at least one clear dramatic payoff
+- No exposition drag — all records/document scenes are tight and purposeful
+- Public/social consequences are dramatized, not summarized
+- No emotion-labeling — all feelings are rendered physically or behaviorally
+- No on-the-nose dialogue that states the theme directly
+- No repeated diction creating an echoic effect
+- Every chapter ends with forward momentum
+
+Check for all of the above plus:
+- Character name/age/trait consistency with continuity reference
+- Contradictions with the confirmed ending
+- Chapter-to-chapter flow gaps
 
 Do not rewrite the full manuscript.
-Create a clear Markdown audit report with:
-- Overall readiness score out of 100
-- Critical issues (list affected chapter numbers)
-- Moderate issues (list affected chapter numbers)
-- Minor issues
-- Specific chapter-level fixes needed
-- Final publishing recommendation
+
+Create a Markdown audit report with this exact structure:
+
+## Overall Readiness Score
+[Score] / 100
+[One-sentence summary of the manuscript's current state]
+
+## Critical Issues
+[Issues that directly prevent publication — each with: description, affected chapter numbers, specific fix needed]
+
+## Moderate Issues
+[Issues that lower quality below 90 — each with: description, affected chapter numbers, specific fix needed]
+
+## Minor Issues
+[Small polish items]
+
+## Chapter-Level Fixes Needed
+[For EVERY chapter that needs work, use this exact format:]
+Chapter [N] — [Title]
+[Bullet list of specific, actionable fixes for that chapter]
+
+## Publishing Readiness Assessment
+[Strengths / Risks / Final recommendation]
 
 METADATA:
 {metadata_text}
@@ -1004,39 +1027,47 @@ MANUSCRIPT:
 {manuscript_text}
 """
 
-def generate_final_audit_and_fix_prompt(chapter_number, chapter_text, metadata_text, continuity_ref, ending_text, outline_slice, surrounding_chapters):
+def generate_final_audit_and_fix_prompt(chapter_number, chapter_text, metadata_text, continuity_ref, ending_text, outline_slice, surrounding_chapters, chapter_fix_brief=""):
+    fix_instructions = f"""
+SPECIFIC FIXES REQUIRED FOR THIS CHAPTER:
+{chapter_fix_brief}
+
+Address every item above directly. Do not skip any.
+""" if chapter_fix_brief.strip() else """
+No specific fixes were flagged for this chapter by the audit.
+Review for general continuity, flow, and prose quality.
+"""
+
     return f"""
-You are a professional developmental editor and final manuscript continuity fixer.
+You are a professional developmental editor doing a final manuscript revision pass.
 
-Your task:
-Fix Chapter {chapter_number} based on the final audit issues flagged for this chapter.
-
+Your task: Revise Chapter {chapter_number} to address all flagged issues and raise the novel's publishing readiness score to 90+/100.
+{fix_instructions}
 Your output must have exactly two sections:
 
 # FIXED CHAPTER
 
-[Write the complete corrected chapter here.]
+[Write the complete, fully revised chapter here. Do not truncate.]
 
 # FINAL AUDIT CHANGE LOG
 
-List every fix made.
+List every change made.
 
-For each fix:
-- Original problem
-- Fix applied
-- Why it was necessary
+For each change:
+- Issue addressed
+- What was changed
+- How it resolves the audit finding
 
-If no fixes needed, keep the chapter unchanged and say:
-No final-audit issues found. Chapter retained as-is.
+If no changes were needed, write:
+No issues found. Chapter retained as-is.
 
-Focus on:
-- Cross-chapter continuity errors
-- Timeline problems
-- Repeated or missing reveals
-- Character motivation inconsistencies
-- Chapter ending/beginning flow problems
-- Setup/payoff issues
-- Contradictions with the confirmed ending
+ADDITIONAL QUALITY CHECKS (apply to all chapters regardless of specific flags):
+- Eliminate any remaining emotion-labeling ("she felt sad" → show it physically)
+- Cut any on-the-nose dialogue that states the theme directly
+- Tighten any scenes that are atmospheric but not eventful
+- Ensure chapter endings create forward momentum
+- Fix any repeated diction within this chapter
+- Ensure timeline/season references are consistent with surrounding chapters
 
 PROJECT FILES:
 
@@ -1052,10 +1083,10 @@ CONFIRMED ENDING:
 RELEVANT OUTLINE:
 {outline_slice}
 
-SURROUNDING CHAPTERS (for flow context):
+SURROUNDING CHAPTERS (for flow and continuity):
 {surrounding_chapters}
 
-CHAPTER TO FIX:
+CHAPTER TO REVISE:
 {chapter_text}
 """
 
@@ -1105,42 +1136,112 @@ def get_surrounding_chapters(chapters_dir, chapter_number, window=1):
     return "\n\n".join(parts) if parts else "No surrounding chapters available."
 
 
+def extract_readiness_score(audit_text):
+    """
+    Extracts the numeric readiness score from an audit report.
+    Returns int or None.
+    """
+    m = re.search(r"readiness score[:\s]+(\d+)\s*/\s*100", audit_text, re.I)
+    return int(m.group(1)) if m else None
+
+
+def parse_chapter_fixes(audit_text):
+    """
+    Parses the audit report into a dict of {chapter_number: fix_brief}.
+    Combines:
+    - Chapter-Level Fixes Needed section (most specific)
+    - Critical/Moderate issue descriptions with Affected chapters tags
+    """
+    chapter_fixes = {}
+
+    # 1. Parse "Chapter-Level Fixes Needed" section (most specific and actionable)
+    chap_section = re.search(
+        r"(?is)chapter.level fixes needed(.*?)(?=publishing readiness|final publishing|\Z)",
+        audit_text
+    )
+    if chap_section:
+        section = chap_section.group(1)
+        entries = re.split(r"(?im)^Chapter\s+(\d+)\b", section)
+        i = 1
+        while i < len(entries) - 1:
+            try:
+                ch_num = int(entries[i])
+                fixes = entries[i + 1].strip()
+                if fixes:
+                    chapter_fixes[ch_num] = fixes
+            except (ValueError, IndexError):
+                pass
+            i += 2
+
+    # 2. Layer in Critical / Moderate issue context per chapter
+    for section_name in ["critical issues", "moderate issues"]:
+        sec = re.search(
+            rf"(?is)#+\s*{section_name}(.*?)(?=#+\s*(moderate|minor|chapter.level|publishing)|\Z)",
+            audit_text
+        )
+        if not sec:
+            continue
+        sec_text = sec.group(1)
+        # Split into individual issues
+        issues = re.split(r"(?im)^\d+\)", sec_text)
+        for issue in issues:
+            affected_match = re.search(r"affected chapters?:\s*([\d,\s]+)", issue, re.I)
+            fix_match = re.search(r"fix needed:(.*?)(?=affected|\Z)", issue, re.I | re.S)
+            if not affected_match:
+                continue
+            affected = [int(n.strip()) for n in affected_match.group(1).split(",") if n.strip().isdigit()]
+            fix_brief = fix_match.group(1).strip() if fix_match else issue.strip()[:300]
+            for ch in affected:
+                if ch in chapter_fixes:
+                    chapter_fixes[ch] = chapter_fixes[ch] + "\n\nADDITIONAL ISSUE: " + fix_brief
+                else:
+                    chapter_fixes[ch] = fix_brief
+
+    return chapter_fixes
+
+
 def final_audit_and_fix_all_chapters(metadata_text, continuity_ref, ending_text, outline_text, model, chapters_dir, outputs_dir, final_audit_text="", status=None):
     """
-    Runs a targeted final fix pass — only on chapters flagged as Critical or Moderate
-    in the final audit report. Skips chapters with no significant issues.
-    Uses surrounding chapters instead of full manuscript for context.
+    Targeted final fix pass:
+    - Parses audit report into per-chapter fix briefs
+    - Fixes only chapters flagged as Critical or Moderate
+    - Injects exact fix instructions per chapter
+    - Re-audits after fixing; runs a second pass if score is still below 90
     """
-
     chapter_files = sorted(chapters_dir.glob("chapter_*.md"))
     chapter_files = [
         f for f in chapter_files
         if not f.name.endswith("_log.md") and not f.name.endswith("_final_log.md")
     ]
 
-    flagged_chapters = extract_flagged_chapters(final_audit_text) if final_audit_text.strip() else set()
+    chapter_fix_briefs = parse_chapter_fixes(final_audit_text) if final_audit_text.strip() else {}
+    flagged_chapters   = extract_flagged_chapters(final_audit_text) if final_audit_text.strip() else set()
 
-    # If we couldn't parse any flagged chapters, fix all (safe fallback)
     fix_all = not bool(flagged_chapters)
     if fix_all and status:
-        status.write("Step 7: Could not detect flagged chapters — fixing all chapters as fallback...")
+        status.write("Step 7: No flagged chapters detected — applying quality pass to all chapters...")
 
     final_logs = []
 
+    # ── PASS 1: Fix flagged chapters with specific briefs ───────────────────
     for index, chapter_file in enumerate(chapter_files, start=1):
         chapter_match = re.search(r"chapter_(\d+)\.md", chapter_file.name, re.I)
         chapter_number = int(chapter_match.group(1)) if chapter_match else index
 
         if not fix_all and chapter_number not in flagged_chapters:
-            final_logs.append(f"# Chapter {chapter_number} Final Audit Log\n\nNo critical or moderate issues flagged. Chapter skipped.")
+            final_logs.append(
+                f"# Chapter {chapter_number} Final Audit Log\n\n"
+                f"No critical or moderate issues flagged. Chapter skipped."
+            )
             continue
 
         if status:
-            status.write(f"Step 7: Fixing Chapter {chapter_number}...")
+            status.write(f"Step 7 (Pass 1): Fixing Chapter {chapter_number}...")
 
-        chapter_text = chapter_file.read_text(encoding="utf-8")
+        chapter_text  = chapter_file.read_text(encoding="utf-8")
         outline_slice = get_outline_slice(outline_text, chapter_number)
-        surrounding = get_surrounding_chapters(chapters_dir, chapter_number)
+        surrounding   = get_surrounding_chapters(chapters_dir, chapter_number)
+        fix_brief     = chapter_fix_briefs.get(chapter_number, "")
 
         audit_fix_result = ask_openai(
             generate_final_audit_and_fix_prompt(
@@ -1150,20 +1251,93 @@ def final_audit_and_fix_all_chapters(metadata_text, continuity_ref, ending_text,
                 continuity_ref=continuity_ref,
                 ending_text=ending_text,
                 outline_slice=outline_slice,
-                surrounding_chapters=surrounding
+                surrounding_chapters=surrounding,
+                chapter_fix_brief=fix_brief
             ),
             model=model
         )
 
-        fixed_chapter, final_change_log = split_fixed_chapter_and_final_log(audit_fix_result)
+        fixed_chapter, change_log = split_fixed_chapter_and_final_log(audit_fix_result)
         chapter_file.write_text(fixed_chapter, encoding="utf-8")
 
-        final_log_file = chapters_dir / f"chapter_{chapter_number:02}_final_log.md"
-        final_log_file.write_text(final_change_log, encoding="utf-8")
-        final_logs.append(f"# Chapter {chapter_number} Final Audit Log\n\n{final_change_log}")
+        log_file = chapters_dir / f"chapter_{chapter_number:02}_final_log.md"
+        log_file.write_text(change_log, encoding="utf-8")
+        final_logs.append(f"# Chapter {chapter_number} Final Audit Log\n\n{change_log}")
+
+    save_markdown(outputs_dir / "07_final_audit_fixes.md", "\n\n".join(final_logs))
+
+    # ── PASS 2: Re-audit and fix again if score is still below 90 ──────────
+    if status:
+        status.write("Step 7: Re-auditing to check if score reached 90+...")
+
+    manuscript_after_pass1 = get_full_manuscript(chapters_dir)
+
+    reaudit_text = ask_openai(
+        generate_final_audit_prompt(
+            metadata_text=metadata_text,
+            continuity_ref=continuity_ref,
+            ending_text=ending_text,
+            outline_text=outline_text,
+            manuscript_text=manuscript_after_pass1
+        ),
+        model=model,
+        reasoning_effort="medium"
+    )
+
+    save_markdown(outputs_dir / "07_final_audit_pass2.md", reaudit_text)
+
+    score_after = extract_readiness_score(reaudit_text)
+    if status:
+        status.write(f"Step 7: Re-audit score: {score_after}/100")
+
+    if score_after is not None and score_after < 90:
+        if status:
+            status.write(f"Step 7 (Pass 2): Score {score_after}/100 — running second fix pass on remaining issues...")
+
+        pass2_fixes   = parse_chapter_fixes(reaudit_text)
+        pass2_flagged = extract_flagged_chapters(reaudit_text)
+        pass2_logs    = []
+
+        for index, chapter_file in enumerate(chapter_files, start=1):
+            chapter_match = re.search(r"chapter_(\d+)\.md", chapter_file.name, re.I)
+            chapter_number = int(chapter_match.group(1)) if chapter_match else index
+
+            if chapter_number not in pass2_flagged:
+                continue
+
+            if status:
+                status.write(f"Step 7 (Pass 2): Fixing Chapter {chapter_number}...")
+
+            chapter_text  = chapter_file.read_text(encoding="utf-8")
+            outline_slice = get_outline_slice(outline_text, chapter_number)
+            surrounding   = get_surrounding_chapters(chapters_dir, chapter_number)
+            fix_brief     = pass2_fixes.get(chapter_number, "")
+
+            result2 = ask_openai(
+                generate_final_audit_and_fix_prompt(
+                    chapter_number=chapter_number,
+                    chapter_text=chapter_text,
+                    metadata_text=metadata_text,
+                    continuity_ref=continuity_ref,
+                    ending_text=ending_text,
+                    outline_slice=outline_slice,
+                    surrounding_chapters=surrounding,
+                    chapter_fix_brief=fix_brief
+                ),
+                model=model
+            )
+
+            fixed2, log2 = split_fixed_chapter_and_final_log(result2)
+            chapter_file.write_text(fixed2, encoding="utf-8")
+
+            log_file2 = chapters_dir / f"chapter_{chapter_number:02}_final_log_p2.md"
+            log_file2.write_text(log2, encoding="utf-8")
+            pass2_logs.append(f"# Chapter {chapter_number} Pass 2 Log\n\n{log2}")
+
+        if pass2_logs:
+            save_markdown(outputs_dir / "07_final_audit_fixes_pass2.md", "\n\n".join(pass2_logs))
 
     combined_final_log = "\n\n".join(final_logs)
-    save_markdown(outputs_dir / "07_final_audit_fixes.md", combined_final_log)
     return combined_final_log
 
 
@@ -2049,7 +2223,11 @@ if page == "Auto Mode - Step 1 to Step 10":
 
             save_markdown(OUTPUTS_DIR / "07_final_audit.md", final_audit)
 
-            status.write("Step 7: Fixing flagged chapters only...")
+            initial_score = extract_readiness_score(final_audit)
+            if initial_score:
+                status.write(f"Step 7: Initial audit score: {initial_score}/100. Fixing flagged chapters...")
+            else:
+                status.write("Step 7: Fixing flagged chapters...")
 
             final_audit_fixes = final_audit_and_fix_all_chapters(
                 metadata_text=metadata,
@@ -2172,8 +2350,24 @@ if page == "Auto Mode - Step 1 to Step 10":
             st.subheader("Confirmed Ending")
             st.markdown(expanded_ending)
 
-            st.subheader("Final Audit")
+            initial_score = extract_readiness_score(final_audit)
+            pass2_audit_text = read_markdown(OUTPUTS_DIR / "07_final_audit_pass2.md")
+            final_score = extract_readiness_score(pass2_audit_text) if pass2_audit_text else None
+
+            if initial_score or final_score:
+                score_col1, score_col2 = st.columns(2)
+                with score_col1:
+                    st.metric("Initial Audit Score", f"{initial_score}/100" if initial_score else "N/A")
+                with score_col2:
+                    st.metric("Final Score (after fixes)", f"{final_score}/100" if final_score else "N/A",
+                              delta=f"+{final_score - initial_score}" if (initial_score and final_score) else None)
+
+            st.subheader("Initial Audit Report")
             st.markdown(final_audit)
+
+            if pass2_audit_text:
+                st.subheader("Post-Fix Re-Audit Report")
+                st.markdown(pass2_audit_text)
 
             # Reset phase flags so a new run can start fresh
             st.session_state["auto_phase1_done"] = False
