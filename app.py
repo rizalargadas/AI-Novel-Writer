@@ -13,7 +13,7 @@ load_dotenv()
 
 client = OpenAI()
 
-def get_project_dirs(project_folder: str):
+def get_project_dirs(project_folder: str, create: bool = False):
     """
     Returns (OUTPUTS_DIR, CHAPTERS_DIR, PUBLISHING_DIR) all rooted
     inside the user-chosen project folder. Creates them if missing.
@@ -22,9 +22,10 @@ def get_project_dirs(project_folder: str):
     outputs  = base / "outputs"
     chapters = base / "chapters"
     publishing = base / "publishing"
-    outputs.mkdir(parents=True, exist_ok=True)
-    chapters.mkdir(parents=True, exist_ok=True)
-    publishing.mkdir(parents=True, exist_ok=True)
+    if create:
+        outputs.mkdir(parents=True, exist_ok=True)
+        chapters.mkdir(parents=True, exist_ok=True)
+        publishing.mkdir(parents=True, exist_ok=True)
     return outputs, chapters, publishing
 
 WRITING_PHILOSOPHY = """
@@ -175,7 +176,7 @@ def extract_recommended_number(text, recommendation_label="OPTION", item_label="
 def save_markdown(file_path, content):
     """Save text into a markdown file."""
     file_path = Path(file_path)
-    file_path.parent.mkdir(exist_ok=True)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_text(content, encoding="utf-8")
 
 
@@ -542,6 +543,8 @@ def compile_chapters_to_docx(metadata_text, selected_pitch_text="", outline_text
 
     doc.add_page_break()
 
+    if not chapters_dir.exists():
+        return ""
     chapter_files = sorted(chapters_dir.glob("chapter_*.md"))
 
     chapter_files = [
@@ -1207,6 +1210,8 @@ def clear_generated_chapters(chapters_dir):
     Deletes old generated chapter and chapter log files before a fresh Auto Mode run.
     Prevents old project chapters from being compiled into the new manuscript.
     """
+    if not chapters_dir.exists():
+        return
     for file in chapters_dir.glob("chapter_*.md"):
         file.unlink()
 
@@ -1712,11 +1717,15 @@ if page == "Auto Mode - Step 1 to Step 10":
         st.success(f"Title confirmed: **{final_title}**")
         st.info(f"All files will be saved to: `{novel_dir}`")
 
-        OUTPUTS_DIR, CHAPTERS_DIR, PUBLISHING_DIR = get_project_dirs(str(novel_dir))
+        # Paths only — no mkdir yet. Folders are created when the run actually starts.
+        OUTPUTS_DIR, CHAPTERS_DIR, PUBLISHING_DIR = get_project_dirs(str(novel_dir), create=False)
 
         run_phase2 = st.button("▶ Run Steps 2–10 (Full Auto)", key="run_phase2")
 
         if run_phase2:
+            # NOW create the folders — title is confirmed and run has started
+            OUTPUTS_DIR, CHAPTERS_DIR, PUBLISHING_DIR = get_project_dirs(str(novel_dir), create=True)
+
             selected_pitch = st.session_state["auto_selected_pitch"]
             pitch_options_raw = st.session_state["auto_pitch_options_raw"]
 
