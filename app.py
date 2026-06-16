@@ -734,7 +734,24 @@ CHAPTER TEXT:
 {chapter_text}
 """
 
-def generate_outline_prompt(metadata_text, character_text, ending_text):
+def generate_outline_prompt(metadata_text, character_text, ending_text, chapter_count=None):
+    if chapter_count:
+        chapter_instruction = f"""IMPORTANT:
+- The outline must have EXACTLY {chapter_count} chapters — no more, no less.
+- Each chapter heading must start with this exact format:
+Chapter 1 - [Chapter Title]
+Chapter 2 - [Chapter Title]
+...
+Chapter {chapter_count} - [Chapter Title]"""
+    else:
+        chapter_instruction = """IMPORTANT:
+- The outline must have at least 20 chapters.
+- If the story needs more than 20 chapters, create more.
+- Each chapter heading must start with this exact format:
+Chapter 1 - [Chapter Title]
+Chapter 2 - [Chapter Title]
+Chapter 3 - [Chapter Title]"""
+
     return f"""
 You are a professional story architect and developmental editor.
 
@@ -749,13 +766,7 @@ Based on the story materials below, choose the strongest story structure from:
 
 Then create a chapter-by-chapter outline.
 
-IMPORTANT:
-- The outline must have at least 20 chapters.
-- If the story needs more than 20 chapters, create more.
-- Each chapter heading must start with this exact format:
-Chapter 1 - [Chapter Title]
-Chapter 2 - [Chapter Title]
-Chapter 3 - [Chapter Title]
+{chapter_instruction}
 
 Each chapter should include:
 - Hooky chapter title
@@ -1603,13 +1614,26 @@ if page == "Auto Mode - Step 1 to Step 10":
         placeholder="Describe your story idea here. Genre, tone, and theme will be inferred automatically."
     )
 
-    fallback_chapter_count = st.number_input(
-        "Fallback chapter count (used if the outline count cannot be detected)",
-        min_value=20,
-        max_value=100,
-        value=20,
-        step=1
+    st.subheader("Chapter Count")
+    chapter_mode = st.radio(
+        "How should the number of chapters be decided?",
+        ["Let AI decide", "I'll set the number"],
+        key="chapter_mode",
+        horizontal=True
     )
+
+    if chapter_mode == "I'll set the number":
+        manual_chapter_count = st.number_input(
+            "Number of chapters",
+            min_value=5,
+            max_value=200,
+            value=20,
+            step=1,
+            help="The AI will be instructed to write exactly this many chapters."
+        )
+    else:
+        manual_chapter_count = None
+        st.caption("The AI will decide the chapter count based on the story. Minimum 20 chapters.")
 
     run_phase1 = st.button("Generate Pitch & Detect Title", disabled=not auto_enabled)
 
@@ -1640,6 +1664,7 @@ if page == "Auto Mode - Step 1 to Step 10":
         st.session_state["auto_pitch_options_raw"] = pitch_options_raw
         st.session_state["auto_pitch_options"] = pitch_options
         st.session_state["auto_recommended_pitch_number"] = recommended_pitch_number
+        st.session_state["auto_manual_chapter_count"] = manual_chapter_count
         st.session_state["auto_phase1_done"] = True
         st.session_state["auto_title_approved"] = False
         st.session_state["auto_pitch_chosen"] = False
@@ -1743,6 +1768,7 @@ if page == "Auto Mode - Step 1 to Step 10":
 
             selected_pitch = st.session_state["auto_selected_pitch"]
             pitch_options_raw = st.session_state["auto_pitch_options_raw"]
+            manual_chapter_count = st.session_state.get("auto_manual_chapter_count")
 
             progress = st.progress(0)
             status = st.empty()
@@ -1827,15 +1853,19 @@ if page == "Auto Mode - Step 1 to Step 10":
             # STEP 5 - Outline
             status.write("Step 5: Generating outline...")
             outline = ask_openai(
-                generate_outline_prompt(metadata, characters, expanded_ending),
+                generate_outline_prompt(metadata, characters, expanded_ending, chapter_count=manual_chapter_count),
                 model=model
             )
             save_markdown(OUTPUTS_DIR / "05_outline.md", outline)
 
             detected_chapter_count = extract_chapter_count_from_outline(outline)
-            chapter_count = max(20, detected_chapter_count or int(fallback_chapter_count))
 
-            status.write(f"Step 5 complete. Detected {detected_chapter_count} chapters. Writing {chapter_count} chapters.")
+            if manual_chapter_count:
+                chapter_count = int(manual_chapter_count)
+                status.write(f"Step 5 complete. Using your chosen chapter count: {chapter_count} chapters.")
+            else:
+                chapter_count = max(20, detected_chapter_count or 20)
+                status.write(f"Step 5 complete. AI chose {detected_chapter_count} chapters. Writing {chapter_count} chapters.")
 
             progress.progress(50)
 
